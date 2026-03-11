@@ -45,6 +45,19 @@ conda run -n ExplicitLLM ruff check xxx --fix
 ```
 
 
+### 2.3 main.py CLI 入口（生产命令）
+
+| 子命令 | 功能 | 前置模块 |
+|--------|------|----------|
+| `build-knowledge` | Phase 0 知识构建 | §1.2+§1.3+§1.5 |
+| `train --phase {0,1,2,3}` | 训练管线 | §1.7+§1.9+§1.10 |
+| `eval` | 评测入口 | §1.10 |
+| `answer` | 端到端 QA | §1.10 |
+
+用法：`conda run -n ExplicitLLM python main.py [--config path] [--device dev] [--override key=value ...] {子命令}`
+
+模块验证不在 main.py 中，统一通过 `tests/integration/` 执行。
+
 ## 3. 标准作业程序 (Standard Operating Procedure)
 > **Agent 必须严格遵守以下生命周期执行任务：**
 
@@ -98,7 +111,9 @@ conda run -n ExplicitLLM ruff check xxx --fix
 
 #### Agent 测试输出规范
 
-> **除了使用pytest进行单元测试，还必须构建一个完善的main.py文件将所有过程串联起来，并必须将完整执行过程保存为 Markdown 文件，供 Claude Code 智能分析，以消除格式输出正确但是逻辑错误的误差或者实际输出质量低低问题。**
+> **main.py 是生产 CLI 入口**（build-knowledge / train / eval / answer），不含 demo 或验证逻辑。
+> 模块验证通过 `tests/integration/test_{module}_flow.py` + Markdown 报告完成。
+> 严禁在 main.py 中使用 MagicMock/玩具参数。
 
 | 要素 | 规范 |
 |------|------|
@@ -132,6 +147,7 @@ conda run -n ExplicitLLM ruff check xxx --fix
 | 架构与模块设计 | `.report/CODEMAPS/{architecture,backend,data}.md` | 整体架构、分层设计、模块依赖 |
 | 该项目最主要的参考项目 | `Reference/Tree-TRM`| 特定模块的详细设计 |
 | 其他参考项目 | `Reference/PageIndex_ Next-Generation Vectorless, Reasoning-based RAG.md`和 `Reference/Tree-TRM`|  |
+| 模块构建状态 | `docs/TD.md` 各 §1.x 节顶部 | 实现状态、依赖、验证 checkpoint |
 
 ## 6. 输出规范
 
