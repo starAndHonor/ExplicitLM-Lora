@@ -22,6 +22,12 @@
 > - 或在命令前显式添加 `source activate ExplicitLLM &&`
 > - 如果需要使用llm可以依据 '.env'环境变量文件使用
 
+> [!CRITICAL]
+> **GPU 使用规范：必须且只能使用 GPU 6（系统第 7 块，索引从 0 开始）**
+> - 所有涉及 GPU 的命令必须通过 `CUDA_VISIBLE_DEVICES=6` 指定
+> - 示例：`CUDA_VISIBLE_DEVICES=6 conda run -n ExplicitLLM python xxx`
+> - **严禁**硬编码其他 GPU 索引，**严禁**省略 `CUDA_VISIBLE_DEVICES` 导致占用其他 GPU
+
 ```bash
 # 激活项目环境（交互式 shell）
 conda activate ExplicitLLM

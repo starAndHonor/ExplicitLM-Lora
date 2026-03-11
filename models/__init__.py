@@ -6,6 +6,7 @@ from models.injection_modules import (
     RMSNorm,
     masked_mean_pool,
 )
+from models.modified_model import ModifiedQwen
 from models.qwen_wrapper import KnowledgeEncoder, load_base_model
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "AttentionInjection",
     "ConcatProjection",
     "GatedInjection",
+    "ModifiedQwen",
 ]

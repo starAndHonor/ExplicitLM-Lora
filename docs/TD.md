@@ -867,7 +867,7 @@ class GatedInjection(BaseInjection):
 
 ### 1.9 models/modified_model.py — ModifiedQwen
 
-**状态**: ⬜ 待实现 · L5 模型 · 前置: §1.3,§1.8 · 解锁: §1.10 · 测试: `test_modified_model.py`
+**状态**: ✅ 已完成 · L5 模型 · 前置: §1.3,§1.8 · 解锁: §1.10 · 测试: `test_modified_model.py`
 
 **文件**: `models/modified_model.py`
 **职责**: 通过 Hook 机制在 Qwen3 指定层注入知识，实现无侵入式融合。
@@ -963,11 +963,16 @@ input_ids [B, L]  +  knowledge_ids [B, K_f]
 **依赖**: transformers, models/injection_modules.py, models/qwen_wrapper.py
 
 **验证 Checkpoint**:
-- [ ] 单元测试全部通过
-- [ ] 覆盖率 ≥ 80%
-- [ ] `tests/integration/test_modified_model_flow.py` 端到端验证通过
-- [ ] Markdown 报告生成到 `tests/outputs/modified_model/`
-- [ ] Hook 正确注册到 4 层；logits 形状 [B,L,V]
+- [x] 单元测试全部通过（10/10）
+- [x] 覆盖率 100%（models/modified_model.py）
+- [x] `tests/integration/test_modified_model_flow.py` 端到端验证通过（5/5）
+- [x] Markdown 报告生成到 `tests/outputs/modified_model/`
+- [x] Hook 正确注册到 4 层；logits 形状 [B,L,V]
+
+**关键实现说明**:
+- injection_modules 在 `__init__` 中自动转换为 base_model 的 dtype（解决 bf16/float32 混用问题）
+- hook 直接返回 `Tensor`（Qwen3DecoderLayer 在 `use_cache=False` 时返回 Tensor，非 tuple）
+- `forward` 显式传递 `use_cache=False` 确保层返回格式与 KnowledgeEncoder 一致
 
 ---
 
