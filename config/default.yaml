@@ -37,6 +37,8 @@ router:
   temperature: 0.1
   # 触发重新聚类的变更比例阈值（变更条目数 / 总条目数 > 此值则重聚类）
   recluster_threshold: 0.1
+  # 粗排每个 grid cell 最多取多少候选（-1=全量倒排索引，1=简单1:1映射）
+  max_candidates_per_cell: -1
 
 train:
   # Phase 1: Router 训练（PKM + FeatureAdapter + RefinedSelector）

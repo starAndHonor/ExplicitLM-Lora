@@ -65,6 +65,9 @@ class RouterConfig:
         num_candidates: 粗排候选条目数
         temperature: PKM softmax 温度参数
         recluster_threshold: 触发重新聚类的变更比例阈值
+        max_candidates_per_cell: 粗排每个 grid cell 最多取多少候选
+            -1 = 全量（倒排索引，热更新多条/格场景）
+            >0 = 每格上限（=1 时退化为 1:1 简单映射，对齐参考项目行为）
     """
 
     knowledge_num: int
@@ -75,6 +78,7 @@ class RouterConfig:
     num_candidates: int
     temperature: float
     recluster_threshold: float
+    max_candidates_per_cell: int
 
 
 @dataclass
