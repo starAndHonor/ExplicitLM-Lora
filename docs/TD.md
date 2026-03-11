@@ -37,14 +37,14 @@
 
 ### 1.1 config.py — 配置管理
 
-**文件**: `config.py`（dataclass 定义）+ `config/default.yaml`（全量配置值）
+**文件**: `config.py`（dataclass 定义 + 加载逻辑）+ `config/default.yaml`（全量配置值）+ `.env.example`（敏感信息模板）
 **职责**: 所有超参数的 dataclass 类型定义（无默认值，YAML 漏写即报错）+ 三层优先级加载。
 
 #### 设计原则
 
-- dataclass **无默认值**：纯类型定义 + 结构化访问，强制 YAML 写全所有字段
+- dataclass **无默认值**：纯类型定义 + 结构化访问，强制 YAML 写全所有字段，缺字段在 `load_config()` 时立即报错
 - 三层优先级：`CLI args > .env > YAML`，高优先级覆盖低优先级
-- 敏感信息（API keys）只写 `.env`，不进 YAML 和代码
+- 敏感信息（模型绝对路径、API keys）只写 `.env`，不进 YAML 和代码
 
 #### Dataclass 定义
 
@@ -73,44 +73,92 @@ class RouterConfig:
 
 @dataclass
 class TrainConfig:
+    # Phase 1: Router 训练（PKM + FeatureAdapter + RefinedSelector）
+    phase1_lr: float             # 1e-3
+    phase1_batch_size: int       # 64（每卡）
+    phase1_max_epochs: int       # 3
+    phase1_warmup_steps: int     # 200
+    # Phase 2: Fusion 预训练（FineWeb-Edu，Injection + Encoder）
     phase2_lr: float             # 3e-4
-    phase3_lr: float             # 1e-4
     phase2_batch_size: int       # 32（每卡）
-    phase3_batch_size: int       # 16（每卡）
     phase2_max_epochs: int       # 5
-    phase3_max_epochs: int       # 10（配合 early stopping）
-    patience: int                # 3（early stopping）
-    warmup_steps: int            # 100（Phase 2）/ 50（Phase 3）
+    phase2_warmup_steps: int     # 100
+    # Phase 3: 下游 SFT（MedQA，早停）
+    phase3_lr: float             # 1e-4
+    phase3_batch_size: int       # 16（每卡）
+    phase3_max_epochs: int       # 10
+    phase3_warmup_steps: int     # 50
+    # 公共参数
+    patience: int                # 3（Phase 3 early stopping）
     grad_clip: float             # 1.0
-    router_alpha: float          # 0.2（KL 损失权重，见 §1.7）
     bf16: bool                   # True
+
+@dataclass
+class DataConfig:
+    fusion_length: int           # 64（与 model.fusion_length 保持一致）
+    anchor_length: int           # 128（与 model.anchor_length 保持一致）
+    num_workers: int             # 4（DataLoader 并行 worker 数）
+    train_max_samples: int       # -1（-1 = 使用全量数据）
+
+@dataclass
+class PathsConfig:
+    model_dir: str               # 基础模型目录（可被 .env MODEL_PATH 覆盖）
+    llmlingua_model_dir: str     # LLMLingua 模型目录（可被 .env LLMLINGUA_PATH 覆盖）
+    data_dir: str                # 数据根目录
+    checkpoint_dir: str          # 检查点目录
+    log_dir: str                 # 日志目录
+    results_dir: str             # 评测结果目录
+
+@dataclass
+class EvalConfig:
+    medqa_knowledge_map: str     # MedQA 知识映射文件路径（.jsonl）
+    arc_knowledge_map: str       # ARC 知识映射文件路径
+    mmlu_knowledge_map: str      # MMLU 知识映射文件路径
+    lm_eval_tasks: List[str]     # lm-eval 任务名列表
+    num_fewshot: int             # few-shot 数量（0 = zero-shot）
 
 @dataclass
 class Config:
     model: ModelConfig
     router: RouterConfig
     train: TrainConfig
-
-    @classmethod
-    def load(cls, yaml_path: str, cli_args: Optional[Dict] = None) -> "Config":
-        """
-        三层合并加载:
-          1. 读取 YAML → base dict
-          2. 读取 .env → 覆盖敏感字段
-          3. cli_args → 最终覆盖
-          4. dict → Config（缺字段报 TypeError）
-        """
+    data: DataConfig
+    paths: PathsConfig
+    eval: EvalConfig
 ```
+
+#### 加载函数
+
+```python
+def load_config(yaml_path: str, cli_overrides: Optional[Dict[str, Any]] = None) -> Config:
+    """
+    三层合并加载（对外唯一入口）:
+      1. _load_yaml()          → 读取 YAML → base dict
+      2. _override_from_env()  → 读取 .env → 覆盖 paths.model_dir / paths.llmlingua_model_dir
+      3. _override_from_cli()  → cli_overrides（点路径格式）→ 最终覆盖
+      4. _dict_to_config()     → dict → Config（缺字段报 TypeError）
+    """
+
+# CLI 覆盖使用点路径格式，例如：
+# cli_overrides = {"model.injection_layers": [4, 8, 12], "train.phase2_lr": 1e-4}
+```
+
+#### .env 支持的覆盖字段
+
+| 环境变量 | 覆盖目标 |
+|---------|---------|
+| `MODEL_PATH` | `paths.model_dir` |
+| `LLMLINGUA_PATH` | `paths.llmlingua_model_dir` |
 
 #### 文件分工
 
 | 文件 | 内容 | 提交到 Git |
 |------|------|-----------|
 | `config/default.yaml` | 全量非敏感配置（必须写全所有字段） | 是 |
-| `.env` | 敏感信息（LLM API keys 等） | 否 |
-| `.env.example` | `.env` 模板（值留空） | 是 |
+| `.env` | 敏感信息（模型绝对路径、API Token） | 否 |
+| `.env.example` | `.env` 模板（值留空，供参考） | 是 |
 
-**依赖**: dataclasses, yaml, python-dotenv
+**依赖**: `dataclasses`（标准库）, `pyyaml`, `python-dotenv`
 
 ---
 
