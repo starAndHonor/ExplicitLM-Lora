@@ -48,7 +48,8 @@ def _make_store(knowledge_num: int = KNOWLEDGE_NUM) -> DualKnowledgeStore:
 def _make_store_with_pca(knowledge_num: int = KNOWLEDGE_NUM) -> DualKnowledgeStore:
     """
     构造已初始化 pca_matrix 的 DualKnowledgeStore（跳过真实聚类，直接注入合法状态）。
-    用于测试 add_entries 的近似分配路径。
+    用于测试 add_entries 的高精度分配路径。
+    pca 维度 d=4，row/col_centroids 为 [num_keys, d//2=2]。
     """
     store = _make_store(knowledge_num)
     d = 4  # 极小维度，用于 pca_matrix 构造
@@ -59,6 +60,22 @@ def _make_store_with_pca(knowledge_num: int = KNOWLEDGE_NUM) -> DualKnowledgeSto
     store.row_centroids = torch.zeros(num_keys, d // 2, dtype=torch.float)
     store.col_centroids = torch.zeros(num_keys, d // 2, dtype=torch.float)
     return store
+
+
+def _make_mock_encoder(d: int = 4) -> MagicMock:
+    """
+    构造 mock KnowledgeEncoder，encode_mean 返回 [B, d] 零张量。
+    d 必须与 _make_store_with_pca 的 pca_matrix 维度一致（默认 d=4）。
+    """
+    encoder = MagicMock()
+    encoder.device = DEVICE
+
+    def fake_encode_mean(ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        b = ids.shape[0]
+        return torch.zeros(b, d, dtype=torch.float)
+
+    encoder.encode_mean.side_effect = fake_encode_mean
+    return encoder
 
 
 # ─────────────────────────────────────────────
@@ -182,7 +199,7 @@ class TestDualKnowledgeStore:
         b = 3
         fusion_ids = torch.randint(1, 500, (b, FUSION_LENGTH))
         anchor_ids = torch.randint(1, 500, (b, ANCHOR_LENGTH))
-        store.add_entries(fusion_ids, anchor_ids)
+        store.add_entries(fusion_ids, anchor_ids, _make_mock_encoder())
 
         assert store.next_free == b
         assert store.change_counter == b
@@ -198,7 +215,7 @@ class TestDualKnowledgeStore:
         b = 4
         fusion_ids = torch.randint(1, 500, (b, FUSION_LENGTH))
         anchor_ids = torch.randint(1, 500, (b, ANCHOR_LENGTH))
-        store.add_entries(fusion_ids, anchor_ids)
+        store.add_entries(fusion_ids, anchor_ids, _make_mock_encoder())
         assert store.change_counter == b
 
         store.delete_entries([1, 3])
@@ -215,7 +232,7 @@ class TestDualKnowledgeStore:
         b = KNOWLEDGE_NUM
         fusion_ids = torch.randint(1, 500, (b, FUSION_LENGTH))
         anchor_ids = torch.randint(1, 500, (b, ANCHOR_LENGTH))
-        store.add_entries(fusion_ids, anchor_ids)
+        store.add_entries(fusion_ids, anchor_ids, _make_mock_encoder())
         # 刚写入时 change_counter=N_valid，比例=1.0 > 0.1
         assert store.should_recluster()
 
@@ -227,10 +244,11 @@ class TestDualKnowledgeStore:
     def test_dual_store_next_free_overflow_raises(self) -> None:
         """超出 knowledge_num 时 add_entries 应 RuntimeError。"""
         store = _make_store_with_pca(knowledge_num=KNOWLEDGE_NUM)
+        mock_enc = _make_mock_encoder()
         # 先填满
         fusion_ids = torch.randint(1, 500, (KNOWLEDGE_NUM, FUSION_LENGTH))
         anchor_ids = torch.randint(1, 500, (KNOWLEDGE_NUM, ANCHOR_LENGTH))
-        store.add_entries(fusion_ids, anchor_ids)
+        store.add_entries(fusion_ids, anchor_ids, mock_enc)
         assert store.next_free == KNOWLEDGE_NUM
 
         # 再添加 1 条，应溢出
@@ -238,6 +256,7 @@ class TestDualKnowledgeStore:
             store.add_entries(
                 torch.randint(1, 500, (1, FUSION_LENGTH)),
                 torch.randint(1, 500, (1, ANCHOR_LENGTH)),
+                mock_enc,
             )
 
     def test_dual_store_add_entries_before_recluster_raises(self) -> None:
@@ -246,7 +265,7 @@ class TestDualKnowledgeStore:
         fusion_ids = torch.randint(1, 500, (2, FUSION_LENGTH))
         anchor_ids = torch.randint(1, 500, (2, ANCHOR_LENGTH))
         with pytest.raises(RuntimeError, match="compact_and_recluster"):
-            store.add_entries(fusion_ids, anchor_ids)
+            store.add_entries(fusion_ids, anchor_ids, _make_mock_encoder())
 
     def test_dual_store_delete_empty_ids_noop(self) -> None:
         """空列表删除是 no-op，不改变状态。"""
@@ -260,7 +279,7 @@ class TestDualKnowledgeStore:
         b = 3
         fusion_ids = torch.randint(1, 500, (b, FUSION_LENGTH))
         anchor_ids = torch.randint(1, 500, (b, ANCHOR_LENGTH))
-        store.add_entries(fusion_ids, anchor_ids)
+        store.add_entries(fusion_ids, anchor_ids, _make_mock_encoder())
 
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
             tmp_path = f.name

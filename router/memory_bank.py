@@ -292,17 +292,19 @@ class DualKnowledgeStore:
         self,
         fusion_token_ids: torch.Tensor,
         anchor_token_ids: torch.Tensor,
+        encoder: "KnowledgeEncoder",
     ) -> None:
         """
         热更新：批量添加新知识条目（调用方负责预处理/压缩/截断）。
 
-        近似分配策略：复用已有的 pca_matrix 和 centroids 对新条目做近似 cluster 分配。
-        若尚未做过首次 recluster（pca_matrix 为 None），直接 RuntimeError，
-        强制研究者先调用 compact_and_recluster 初始化聚类状态。
+        分配策略：使用 encoder 对 anchor_token_ids 做真实编码后，
+        调用 SubspaceClustering.assign_approximate 做高精度 cluster 分配，
+        复用上次 recluster 的 PCA 状态，避免全量重聚类。
 
         参数：
             fusion_token_ids: [B, K_f] 的压缩 token IDs，dtype=torch.long
             anchor_token_ids: [B, K_a] 的原文截断 token IDs，dtype=torch.long
+            encoder: KnowledgeEncoder 实例，用于编码 anchor_token_ids
 
         返回：
             None
@@ -312,6 +314,9 @@ class DualKnowledgeStore:
             RuntimeError: knowledge_num 已满
             AssertionError: 输入形状或 dtype 不合法
         """
+        # 延迟导入避免循环依赖
+        from router.clustering import SubspaceClustering  # type: ignore[import]
+
         # Phase 1: 前置校验
         assert fusion_token_ids.dtype == torch.long, (
             f"fusion_token_ids 必须为 torch.long，实际 {fusion_token_ids.dtype}"
@@ -348,8 +353,29 @@ class DualKnowledgeStore:
             self.anchor_bank.data[start:end].copy_(anchor_token_ids.to(self.device))
             self.valid_mask[start:end] = True
 
-            # Phase 3: 近似 cluster 分配，更新倒排索引
-            grid_indices = self._approximate_assign(anchor_token_ids)  # [B]
+            # Phase 3: 高精度 cluster 分配（真实 encoder 编码 + PCA 最近邻）
+            with torch.no_grad():
+                mask = (anchor_token_ids != 0).long()
+                anchor_emb = (
+                    encoder.encode_mean(
+                        anchor_token_ids.to(encoder.device),
+                        mask.to(encoder.device),
+                    )
+                    .cpu()
+                    .float()
+                    .numpy()
+                )  # [B, D]
+            grid_indices_np = SubspaceClustering.assign_approximate(
+                anchor_emb,
+                self.pca_matrix.cpu().numpy(),
+                self.pca_mean.cpu().numpy(),
+                self.row_centroids.cpu().numpy(),
+                self.col_centroids.cpu().numpy(),
+                self._num_keys,
+            )  # np.ndarray [B]
+            grid_indices = torch.tensor(
+                grid_indices_np, dtype=torch.long, device=self.device
+            )  # [B]
             self._append_to_inverted_index(
                 torch.arange(start, end, dtype=torch.long, device=self.device),
                 grid_indices,
@@ -485,63 +511,6 @@ class DualKnowledgeStore:
             # Phase 5: 重置计数器
             self.next_free = n_valid
             self.change_counter = 0
-
-    def _approximate_assign(self, anchor_token_ids: torch.Tensor) -> torch.Tensor:
-        """
-        利用已有 PCA 状态对新条目做近似 cluster 分配（不触发全量 recluster）。
-
-        流程：
-            1. 将 anchor_token_ids 转为 mean embedding（直接用 token ID 均值近似，不调 encoder）
-            2. PCA 旋转 → 交错分割 → 最近邻 row/col centroids → grid_idx
-
-        注意：此处使用 token ID 的 float 均值作为极简 embedding 近似，
-        精度低于真实 encoder 编码，但热更新阶段的近似分配仅影响检索召回率，
-        在下次 recluster 时会被纠正。
-
-        参数：
-            anchor_token_ids: [B, K_a] 的 token IDs，dtype=torch.long
-
-        返回：
-            [B] 的 grid 索引，dtype=torch.long
-
-        异常：
-            RuntimeError: pca_matrix 为 None（不应从外部调用此方法时触发）
-        """
-        if self.pca_matrix is None:
-            raise RuntimeError(
-                "_approximate_assign: pca_matrix 为 None，内部逻辑错误（不应到达此处）"
-            )
-
-        # Phase 1: 极简 embedding（token ID 浮点均值，[B, K_a] → [B, D_approx]）
-        # 实际 D 由 pca_matrix 决定，这里用 token ID 本身的归一化均值作为 1D 特征，
-        # 并广播到 D 维（仅用于近似最近邻，精度有限）
-        b = anchor_token_ids.shape[0]
-        d = self.pca_matrix.shape[0]
-        # 每条 anchor 的归一化 token ID 均值，扩展为 D 维（粗糙近似）
-        token_mean = anchor_token_ids.float().mean(dim=-1, keepdim=True)  # [B, 1]
-        approx_emb = token_mean.expand(b, d).to(self.device)  # [B, D]
-
-        # Phase 2: PCA 旋转
-        centered = approx_emb - self.pca_mean.unsqueeze(0)  # [B, D]
-        rotated = centered @ self.pca_matrix  # [B, D]
-
-        # Phase 3: 交错分割
-        sub1 = rotated[:, 0::2]  # [B, D//2]（Row 子空间）
-        sub2 = rotated[:, 1::2]  # [B, D//2]（Col 子空间）
-
-        # Phase 4: 最近邻 row/col centroid
-        # row_centroids: [num_keys, D//2]
-        # 距离 = ||sub1[i] - row_centroids[k]||²
-        row_dist = torch.cdist(
-            sub1.float(), self.row_centroids.float()
-        )  # [B, num_keys]
-        col_dist = torch.cdist(
-            sub2.float(), self.col_centroids.float()
-        )  # [B, num_keys]
-        row_labels = row_dist.argmin(dim=-1)  # [B]
-        col_labels = col_dist.argmin(dim=-1)  # [B]
-
-        return row_labels * self._num_keys + col_labels  # [B]
 
     def _rebuild_inverted_index(
         self,
