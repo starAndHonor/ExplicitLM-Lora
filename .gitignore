@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyTorch
+*.pth
+*.pt
+*.safetensors
+
+# 数据与模型
+data/
+checkpoints/
+results/
+logs/
+*.log
+
+# 环境配置
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 测试覆盖率与测试输出
+.coverage
+htmlcov/
+.pytest_cache/
+tests/outputs/*
+!tests/outputs/.gitkeep
+
+# Ruff
+.ruff_cache/
+
+# GitNexus
+.gitnexus/
+
+# 模型目录（大文件，不提交）
+qwen3-0.6B/
+llmlingua-2-xlm-roberta-large-meetingbank/
+
+# 参考项目（仅本地使用）
+Reference/
