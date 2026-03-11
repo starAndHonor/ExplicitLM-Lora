@@ -1,0 +1,102 @@
+# Explicit-LoRA 全量非敏感配置
+# 注意：所有字段必须写全，dataclass 无默认值，缺字段将在 load_config() 时立即报错
+# 敏感信息（API Key、绝对路径）请写入 .env 文件，不要修改此文件
+
+model:
+  # 基础模型标识（HuggingFace 路径或本地目录名，绝对路径请用 .env MODEL_PATH）
+  base_model: "Qwen/Qwen3-0.6B"
+  # Transformer 隐藏维度（Qwen3-0.6B: 1024，4B: 2560，7B: 3584）
+  hidden_dim: 1024
+  # Transformer 层数（Qwen3-0.6B: 28）
+  num_layers: 28
+  # 知识注入方式: "attention" | "concat" | "gated"
+  injection_method: "attention"
+  # 注入模块所在层索引（从 0 起，每 6 层一个注入点）
+  injection_layers: [6, 12, 18, 24]
+  # 知识编码器使用 Qwen3 前 N 层
+  encoder_depth: 6
+  # Fusion Bank 每条知识的 token 数（LLMLingua 压缩后）
+  fusion_length: 64
+  # Anchor Bank 每条知识的 token 数（原文截断，用于路由匹配）
+  anchor_length: 128
+
+router:
+  # 知识库总条目数（1024 * 1024 = 1,048,576 ≈ 1M）
+  knowledge_num: 1048576
+  # 路由器内部隐藏维度
+  dim: 1024
+  # 查询向量维度（来自 FeatureAdapter 输出）
+  query_dim: 1024
+  # Product Key Memory 行/列 key 子空间维度（= dim // 2）
+  key_proj_dim: 512
+  # FeatureAdapter 中间维度
+  adapter_dim: 512
+  # 粗排候选条目数（从 PKM Top-N 候选中进行精排）
+  num_candidates: 32
+  # PKM softmax 温度参数（越低越尖锐）
+  temperature: 0.1
+  # 触发重新聚类的变更比例阈值（变更条目数 / 总条目数 > 此值则重聚类）
+  recluster_threshold: 0.1
+
+train:
+  # Phase 1: Router 训练（PKM + FeatureAdapter + RefinedSelector）
+  phase1_lr: 1.0e-3
+  phase1_batch_size: 64
+  phase1_max_epochs: 3
+  phase1_warmup_steps: 200
+
+  # Phase 2: Fusion 预训练（AttentionInjection × 4 + KnowledgeEncoder，FineWeb-Edu）
+  phase2_lr: 3.0e-4
+  phase2_batch_size: 32
+  phase2_max_epochs: 5
+  phase2_warmup_steps: 100
+
+  # Phase 3: 下游 SFT（MedQA，早停）
+  phase3_lr: 1.0e-4
+  phase3_batch_size: 16
+  phase3_max_epochs: 10
+  phase3_warmup_steps: 50
+
+  # 早停耐心轮次（Phase 3 val_loss 连续 patience 轮不下降则停止）
+  patience: 3
+  # 梯度裁剪最大范数
+  grad_clip: 1.0
+  # 是否使用 bfloat16 混合精度
+  bf16: true
+
+data:
+  # 压缩后知识 token 数（需与 model.fusion_length 保持一致）
+  fusion_length: 64
+  # 原文截断 token 数（需与 model.anchor_length 保持一致）
+  anchor_length: 128
+  # DataLoader 并行 worker 数
+  num_workers: 4
+  # 训练样本上限，-1 表示使用全量数据
+  train_max_samples: -1
+
+paths:
+  # 基础模型权重目录（可被 .env 中的 MODEL_PATH 覆盖为绝对路径）
+  model_dir: "models/qwen3-0.6B"
+  # LLMLingua 压缩模型目录（可被 .env 中的 LLMLINGUA_PATH 覆盖）
+  llmlingua_model_dir: "models/llmlingua-2-xlm-roberta-large"
+  # 数据根目录
+  data_dir: "data"
+  # 训练检查点保存目录
+  checkpoint_dir: "checkpoints"
+  # 日志输出目录
+  log_dir: "logs"
+  # 评测结果保存目录
+  results_dir: "results"
+
+eval:
+  # MedQA 知识映射文件（question → compressed_knowledge）
+  medqa_knowledge_map: "data/medqa_knowledge.jsonl"
+  # ARC-Challenge 知识映射文件
+  arc_knowledge_map: "data/arc_knowledge.jsonl"
+  # MMLU 知识映射文件
+  mmlu_knowledge_map: "data/mmlu_knowledge.jsonl"
+  # lm-eval 框架任务名列表
+  lm_eval_tasks:
+    - "medqa_4options"
+  # few-shot 示例数量（0 = zero-shot）
+  num_fewshot: 0
