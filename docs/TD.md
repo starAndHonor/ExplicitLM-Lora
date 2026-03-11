@@ -731,10 +731,24 @@ class MemoryRouter(nn.Module):
 
 ### 1.8 models/injection_modules.py — 注入模块
 
-**状态**: ⬜ 待实现 · L4 注入（可与 L3 并行）· 前置: 无 · 解锁: §1.9 · 测试: `test_injection_modules.py`
+**状态**: ✅ 已完成 · L4 注入（可与 L3 并行）· 前置: 无 · 解锁: §1.9 · 测试: `test_injection_modules.py`
 
 **文件**: `models/injection_modules.py`
 **职责**: 定义三种知识注入方式，共享统一接口 `forward(hidden, knowledge, mask) → hidden`。
+
+#### 辅助组件
+
+```python
+class RMSNorm(nn.Module):
+    """RMS Layer Normalization，与 Qwen3 内部一致，无偏置，可学习 gamma。"""
+    def __init__(self, dim: int, eps: float = 1e-8): ...
+    def forward(self, x: Tensor) -> Tensor: ...   # [..., dim] → [..., dim]
+
+def masked_mean_pool(
+    knowledge: Tensor,           # [B, K, D]
+    mask: Optional[Tensor],      # [B, K]，1=有效 0=pad；None 时全部参与
+) -> Tensor:                     # [B, 1, D]，全 pad 时返回零向量
+```
 
 #### 统一接口
 
@@ -773,14 +787,18 @@ class AttentionInjection(BaseInjection):
 
     def forward(self, hidden: Tensor, knowledge: Tensor, mask: Tensor) -> Tensor:
         """
-        normed = pre_norm(hidden)                       → [B, L, D]
-        Q = W_q(normed)                                 → [B, L, D]
+        normed = pre_norm(hidden)                              → [B, L, D]
+        Q = W_q(normed)                                        → [B, L, D]
 
-        K = cat([null_k, W_k(knowledge)], dim=1)       → [B, K_f+1, D]
-        V = cat([null_v, W_v(knowledge)], dim=1)       → [B, K_f+1, D]
+        # null 向量先与 knowledge 拼接，再统一经 W_k/W_v 投影
+        k_input = cat([null_k, knowledge], dim=1)             → [B, K_f+1, D]
+        v_input = cat([null_v, knowledge], dim=1)             → [B, K_f+1, D]
+        K = W_k(k_input)                                       → [B, K_f+1, D]
+        V = W_v(v_input)                                       → [B, K_f+1, D]
 
-        attn_out = MultiHeadAttention(Q, K, V, mask)   → [B, L, D]
-        output = hidden + out_proj(attn_out)            # 干净残差
+        # float attn_mask：-inf 屏蔽 pad 位置，null 位置始终有效
+        attn_out = F.scaled_dot_product_attention(Q, K, V, attn_mask)  → [B, L, D]
+        output = hidden + out_proj(attn_out)                   # 干净残差
 
         初始化效果: out_proj=0 → attn_out→0 → output=hidden（无注入退化）
         """
@@ -790,7 +808,7 @@ class AttentionInjection(BaseInjection):
 
 ```python
 class ConcatProjection(BaseInjection):
-    """mean_pool → concat → MLP(2D→4D→D) + 残差，约 12.6M 参数/层。"""
+    """mean_pool → concat → MLP(2D→4D→D) + LayerNorm + 残差，约 12.6M 参数/层。"""
 
     def __init__(self, hidden_dim: int):
         self.proj_in = Linear(hidden_dim * 2, hidden_dim * 4)
@@ -802,10 +820,10 @@ class ConcatProjection(BaseInjection):
 
     def forward(self, hidden: Tensor, knowledge: Tensor, mask: Tensor) -> Tensor:
         """
-        k_pooled = masked_mean(knowledge, mask)       → [B, D]
-        k_pooled = k_pooled.unsqueeze(1).expand(-1, L, -1)
-        concat = cat([hidden, k_pooled], dim=-1)      → [B, L, 2D]
-        delta = proj_out(gelu(proj_in(concat)))       → [B, L, D]
+        k_pooled = masked_mean_pool(knowledge, mask)  → [B, 1, D]
+        k_pooled = k_pooled.expand(-1, L, -1)          → [B, L, D]
+        concat = cat([hidden, k_pooled], dim=-1)       → [B, L, 2D]
+        delta = proj_out(gelu(proj_in(concat)))        → [B, L, D]
         output = hidden + norm(delta)
         """
 ```
@@ -821,9 +839,9 @@ class GatedInjection(BaseInjection):
 
     def forward(self, hidden: Tensor, knowledge: Tensor, mask: Tensor) -> Tensor:
         """
-        k_pooled = masked_mean(knowledge, mask)  → [B, D]
-        gate_val = sigmoid(self.gate)             → [D]（近 0.5 初始化）
-        output = hidden + gate_val * k_pooled.unsqueeze(1)
+        k_pooled = masked_mean_pool(knowledge, mask)  → [B, 1, D]
+        gate_val = sigmoid(self.gate)                  → [D]（近 0.5 初始化）
+        output = hidden + gate_val * k_pooled          广播到 [B, L, D]
         零初始化 gate=0 → gate_val=0.5 → 弱注入，训练中动态调整
         """
 ```
@@ -839,11 +857,11 @@ class GatedInjection(BaseInjection):
 **依赖**: torch
 
 **验证 Checkpoint**:
-- [ ] 单元测试全部通过
-- [ ] 覆盖率 ≥ 80%
-- [ ] `tests/integration/test_injection_flow.py` 端到端验证通过
-- [ ] Markdown 报告生成到 `tests/outputs/injection/`
-- [ ] 零初始化残差不变性：初始 forward 输出 ≈ hidden
+- [x] 单元测试全部通过（31/31）
+- [x] 覆盖率 100%
+- [x] `tests/integration/test_injection_flow.py` 端到端验证通过（8/8）
+- [x] Markdown 报告生成到 `tests/outputs/injection/`
+- [x] 零初始化残差不变性：初始 forward 输出相对误差 < 1e-4
 
 ---
 
