@@ -644,64 +644,88 @@ class RefinedSelector(nn.Module):
 
 ### 1.7 router/model.py — MemoryRouter 整合
 
-**状态**: ⬜ 待实现 · L4 整合 · 前置: §1.4,§1.5,§1.6 · 解锁: §1.10 · 测试: `test_router_model.py`
+**状态**: ✅ 已完成 · L4 整合 · 前置: §1.4,§1.5,§1.6 · 解锁: §1.10 · 测试: `test_router_model.py`
 
 **文件**: `router/model.py`
 **职责**: 组合 ProductKeyMemory + FeatureAdapter + RefinedSelector，提供统一的检索接口。
 
+**RouterOutput（dataclass）**:
+
+```python
+@dataclass
+class RouterOutput:
+    best_id:       Tensor          # [B] long — 精排后最优知识条目全局 ID
+    candidates:    Tensor          # [B, num_candidates] long — 粗排候选 ID
+    coarse_scores: Tuple[Tensor, Tensor]  # (scores_1, scores_2) 各 [B, num_keys]
+    fine_scores:   Tensor          # [B, num_candidates] float — 精排原始分数（未 softmax）
+```
+
+**MemoryRouter**:
+
 ```python
 class MemoryRouter(nn.Module):
     """
-    端到端路由器: query text → 最优知识条目 ID。
-    可训练参数 (~15M): query_proj + key_proj + FeatureAdapter + RefinedSelector。
-    Keys (row_keys/col_keys) 不参与梯度，每 epoch 通过 recluster 更新。
+    端到端知识路由器：query embedding → 最优知识条目 ID。
+    可训练参数（Phase 1，约 8M）：
+        pkm（~1.6M）+ adapter（~0.5M）+ selector（~6.3M）
+    encoder 注册为子模块，Phase 1 由训练循环冻结（filter(requires_grad)）。
     """
 
-    def __init__(self, config: RouterConfig, encoder: KnowledgeEncoder):
-        self.pkm = ProductKeyMemory(config)
-        self.adapter = FeatureAdapter(config.dim, config.adapter_dim)
-        self.selector = RefinedSelector(config.adapter_dim)
-        self.encoder = encoder  # 共享 KnowledgeEncoder（用于候选编码）
+    def __init__(self, config: RouterConfig, encoder: KnowledgeEncoder) -> None:
+        self.pkm      = ProductKeyMemory(config)
+        self.adapter  = FeatureAdapter(config.dim, config.adapter_dim)
+        self.selector = RefinedSelector(
+            config.adapter_dim, config.refined_num_heads, config.refined_num_layers
+        )
+        self.encoder      = encoder           # 共享实例，注册为 nn.Module 子模块
+        self._adapter_dim = config.adapter_dim
 
-    def forward(
-        self,
-        query_embedding: Tensor,   # [B, D] — 输入问题的 embedding（Qwen3 编码）
-        store: DualKnowledgeStore,
-    ) -> RouterOutput:
-        """
-        推理流程:
-          1. adapter(query_embedding) → q_adapted [B, 512]
-          2. pkm(query_embedding, store) → candidates [B, ~64], scores_1, scores_2
-          3. 编码候选: encoder(anchor_bank[candidates]) → cand_vecs [B, 64, 512]
-          4. selector(q_adapted, cand_vecs) → scores [B, 64], best_local_idx [B]
-          5. best_id = candidates[best_local_idx] → 全局知识 ID
+    def forward(self, query_embedding: Tensor, store: DualKnowledgeStore) -> RouterOutput:
+        # Step 1: query 侧适配（2D 输入，跳过 mean pool）
+        q_adapted = self.adapter(query_embedding)          # [B, adapter_dim]
 
-        Returns:
-            RouterOutput(
-                best_id:       Tensor[B],      # 最优知识条目全局 ID
-                candidates:    Tensor[B, ~64], # 粗排候选 ID
-                coarse_scores: Tuple[Tensor, Tensor],  # scores_1, scores_2（Router loss 用）
-                fine_scores:   Tensor[B, ~64], # 精排分数（Router loss 用）
-            )
-        """
+        # Step 2: PKM 粗排（4-tuple，第 4 项 q_pkm 废弃）
+        candidates, s1, s2, _ = self.pkm(query_embedding, store)
+        # candidates [B, C]；s1/s2 [B, num_keys]
+
+        # Step 3: 候选侧编码
+        anchor_ids = store.anchor_bank.data[candidates]    # [B, C, K_a]
+        flat_ids   = anchor_ids.reshape(B * C, K_a)        # [B*C, K_a]
+        flat_mask  = (flat_ids != 0).long()                # [B*C, K_a]
+        cand_enc   = self.encoder.forward(flat_ids, flat_mask)         # [B*C, K_a, D]
+        cand_vecs  = self.adapter(cand_enc, flat_mask.bool())          # [B*C, adapter_dim]
+        cand_vecs  = cand_vecs.view(B, C, self._adapter_dim)           # [B, C, adapter_dim]
+
+        # Step 4: 精排
+        fine_scores, best_local = self.selector(q_adapted, cand_vecs)
+        # fine_scores [B, C]；best_local [B]
+
+        # Step 5: 局部 ID → 全局 ID（含范围断言）
+        best_id = candidates[arange(B), best_local]        # [B]
+        assert best_id.max() < store.next_free
+
+        return RouterOutput(best_id, candidates, (s1, s2), fine_scores)
 
     @torch.no_grad()
-    def retrieve(
-        self, query_embedding: Tensor, store: DualKnowledgeStore
-    ) -> Tensor:
-        """推理专用（无梯度），返回 knowledge_ids [B, K_f]（来自 Fusion Bank）"""
+    def retrieve(self, query_embedding: Tensor, store: DualKnowledgeStore) -> Tensor:
+        """推理专用（无梯度），返回 [B, K_f] 压缩 token IDs（来自 FusionBank）。"""
         out = self.forward(query_embedding, store)
-        return store.fusion_bank[out.best_id]   # [B, K_f]
+        return store.fusion_bank[out.best_id]              # [B, K_f]
 ```
 
-**依赖**: router/memory_gate.py, router/feature_adapter.py, router/refined_selector.py, router/memory_bank.py
+**关键实现细节**：
+- 同一个 `FeatureAdapter` 分两次调用：query 侧输入 2D `[B, D]`（直接投影），候选侧输入 3D `[B*C, K_a, D]`（masked mean pool 降维）
+- PKM 返回 4-tuple，第 4 项（L2 归一化行子查询）在 MemoryRouter 中废弃，精排 query 来自 FeatureAdapter
+- 候选编码路径：`anchor_bank.data[candidates]` → reshape → `encoder.forward` → `adapter`（复用同一适配器）
+
+**依赖**: router/memory_gate.py, router/feature_adapter.py, router/refined_selector.py, router/memory_bank.py, models/qwen_wrapper.py
 
 **验证 Checkpoint**:
-- [ ] 单元测试全部通过
-- [ ] 覆盖率 ≥ 80%
-- [ ] `tests/integration/test_router_model_flow.py` 端到端验证通过
-- [ ] Markdown 报告生成到 `tests/outputs/router_model/`
-- [ ] best_id ∈ [0, N)；可训练参数量 ~15M
+- [x] 单元测试全部通过（25/25）
+- [x] 覆盖率 ≥ 80%（router/model.py 100%）
+- [x] `tests/integration/test_router_model_flow.py` 端到端验证通过（8/8）
+- [x] Markdown 报告生成到 `tests/outputs/router_model/`
+- [x] best_id ∈ [0, N)；可训练参数量 ~8M（pkm+adapter+selector）
 
 ---
 
