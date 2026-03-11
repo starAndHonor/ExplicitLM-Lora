@@ -175,18 +175,20 @@ fusion_bank:  Tensor[N, K_f]    # K_f=64, 压缩 facts token IDs
 # Anchor Bank: 存原文截断（路由索引用）
 anchor_bank:  Tensor[N, K_a]    # K_a=128, 原文截断 token IDs
 # 共享索引
-valid_mask:         Tensor[N]       # 有效条目标记
-inverted_index:     Tensor[N]       # 按 cluster 排序的数据 ID
-cluster_offsets:    Tensor[C+1]     # 每个 cluster 的起始偏移
-cluster_counts:     Tensor[C]       # 每个 cluster 的条目数
+valid_mask:         Tensor[N]       # 有效条目标记（bool）
+inverted_index:     Tensor[N]       # 按 cluster 排序的数据 ID，初始全 -1
+cluster_offsets:    Tensor[C+1]     # 每个 cluster 在 inverted_index 中的起始偏移
+cluster_counts:     Tensor[C]       # 每个 cluster 的有效条目数
 # 近似分配状态（全量 recluster 后保存）
-pca_matrix:         Tensor[D, D]    # PCA 旋转矩阵
-pca_mean:           Tensor[D]       # 均值向量
-row_centroids:      Tensor[√N, D//2]
-col_centroids:      Tensor[√N, D//2]
+pca_matrix:         Optional[Tensor[D, D]]      # PCA 旋转矩阵，初始 None
+pca_mean:           Optional[Tensor[D]]         # 均值向量，初始 None
+row_centroids:      Optional[Tensor[num_keys, D//2]]
+col_centroids:      Optional[Tensor[num_keys, D//2]]
 next_free:          int             # 下一个可写入槽位
 change_counter:     int             # 自上次 recluster 以来的变更计数
 ```
+
+C = num_keys²，num_keys = √N，knowledge_num 必须为完全平方数。
 
 #### 类设计
 
@@ -194,56 +196,84 @@ change_counter:     int             # 自上次 recluster 以来的变更计数
 class FusionBank:
     """存 LLMLingua 压缩 facts token IDs [N, K_f]，供知识编码器读取注入。"""
 
-    def __init__(self, knowledge_num: int, fusion_length: int): ...
+    def __init__(self, knowledge_num: int, fusion_length: int, device: str) -> None: ...
 
     def update_all(self, token_ids: Tensor) -> None:
-        """全量替换（Phase 0/训练期）: token_ids [N, K_f]"""
+        """全量替换（Phase 0/训练期）: token_ids [N, K_f]，断言 shape 和 dtype"""
 
     def __getitem__(self, ids: Tensor) -> Tensor:
-        """批量读取: ids [B] → [B, K_f]"""
+        """批量读取: ids [B] → [B, K_f]，断言索引不越界"""
 
 
 class AnchorBank:
     """存原文截断 token IDs [N, K_a]，供聚类计算 embedding。"""
 
-    def __init__(self, knowledge_num: int, anchor_length: int): ...
+    def __init__(self, knowledge_num: int, anchor_length: int, device: str) -> None: ...
 
     def update_all(self, token_ids: Tensor) -> None:
-        """全量替换"""
+        """全量替换，断言 shape 和 dtype"""
 
-    def get_embeddings(self, encoder: "KnowledgeEncoder") -> Tensor:
-        """全量编码: → [N, D]（流式，避免 OOM）"""
+    def get_embeddings(
+        self, encoder: "KnowledgeEncoder", valid_mask: Tensor, chunk_size: int
+    ) -> Tensor:
+        """
+        仅对 valid_mask=True 的条目流式编码（chunk_size=64 避免 OOM）:
+          → [N_valid, D]（encoder.encode_mean mean-pool 后）
+        valid_mask 全 False 时返回空张量
+        """
 
 
 class DualKnowledgeStore:
     """统一管理 FusionBank + AnchorBank + 倒排索引，提供动态更新接口。"""
 
-    def __init__(self, config: RouterConfig, device: str): ...
-
-    def add_entries(self, texts: List[str], compressor: "KnowledgeCompressor") -> None:
+    def __init__(
+        self, config: RouterConfig, fusion_length: int, anchor_length: int, device: str
+    ) -> None:
         """
-        热更新添加条目（近似 cluster 分配）:
-          1. LLMLingua 压缩 → fusion_bank[next_free]
-          2. 原文截断 → anchor_bank[next_free]
-          3. 近似分配（复用 pca_matrix）→ 追加倒排索引
-          4. valid_mask[next_free] = True; change_counter += 1
+        fusion_length / anchor_length 显式传入（来自 ModelConfig），不从 RouterConfig 读取。
+        内部含 threading.Lock 保护所有写操作。
+        """
+
+    def add_entries(
+        self, fusion_token_ids: Tensor, anchor_token_ids: Tensor
+    ) -> None:
+        """
+        热更新添加条目（调用方负责压缩/截断，只接受已预处理的 token IDs）:
+          1. pca_matrix 为 None → RuntimeError（必须先调 compact_and_recluster）
+          2. next_free + B > knowledge_num → RuntimeError（不自动扩容）
+          3. 写入双 Bank；valid_mask[start:end] = True
+          4. 近似分配（_approximate_assign）→ _append_to_inverted_index
+          5. next_free += B; change_counter += B
         """
 
     def delete_entries(self, ids: List[int]) -> None:
         """逻辑删除: valid_mask[ids] = False; change_counter += len(ids)"""
 
     def should_recluster(self) -> bool:
-        """change_counter / N_valid > recluster_threshold"""
+        """change_counter / N_valid > recluster_threshold（N_valid=0 时返回 False）"""
 
     def compact_and_recluster(self, encoder: "KnowledgeEncoder") -> None:
         """
-        物理压缩 + 全量重聚类:
-          1. 收集 valid 条目 → 紧凑排列
-          2. 全量编码 anchor_bank → 聚类
-          3. 更新 pca_matrix, row_centroids, col_centroids
-          4. 重建 inverted_index; change_counter = 0
+        物理压缩 + 全量重聚类（受 _lock 保护）:
+          1. 收集 valid 条目 → 紧凑排列到 bank[0..N_valid-1]
+          2. anchor_bank.get_embeddings(encoder, valid_mask, chunk_size=64) → [N_valid, D]
+          3. SubspaceClustering.fit(embeddings.numpy(), num_keys) → ClusteringResult
+          4. 更新 pca_matrix, pca_mean, row_centroids, col_centroids
+          5. _rebuild_inverted_index → 重建 inverted_index, cluster_offsets, cluster_counts
+          6. next_free = N_valid; change_counter = 0
         """
+
+    def save_state(self, path: str) -> None:
+        """torch.save 序列化所有 buffer + next_free + change_counter"""
+
+    def load_state(self, path: str) -> None:
+        """torch.load 恢复所有状态，自动处理 pca_matrix 等 Optional 字段"""
 ```
+
+**私有方法**：
+- `_approximate_assign(anchor_token_ids)` — 热更新近似分配：用 token ID 浮点均值作为极简 embedding，经 PCA 旋转 + 最近邻 centroid 得 grid_idx（精度较低，下次 recluster 时纠正）
+- `_rebuild_inverted_index(data_indices, grid_indices)` — 全量重建：按 grid_indices 排序后构造 inverted_index、cluster_offsets、cluster_counts
+- `_append_to_inverted_index(data_indices, grid_indices)` — 热更新追加：逐条插入到对应 cluster 末尾（不重排已有条目）
 
 **为什么双 Bank？**
 
@@ -253,7 +283,7 @@ class DualKnowledgeStore:
 | 用途 | 知识编码 → Cross-Attention 注入 | 计算 embedding → 聚类 → 更新 Keys |
 | 语义空间 | 压缩语义（信息密度高） | 原文语义（与 query 同一空间） |
 
-**依赖**: torch, data_builder/compressor.py
+**依赖**: torch（无其他运行时依赖；`KnowledgeEncoder`/`SubspaceClustering` 通过 TYPE_CHECKING 前向引用，避免循环导入）
 
 ---
 
