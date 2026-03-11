@@ -1111,43 +1111,69 @@ Phase 3: 下游 SFT（任务激活）
 
 ### 2.2 Phase 1 Router 训练循环
 
+**实现文件**：`training/phase1_router.py`，通过 `bash scripts/run_phase1_router.sh` 一键启动。
+
+**数据**：`data/compressed/v2/*.parquet`（FineWeb-Edu 预压缩，27 个文件 × 500k 行 = 13.5M 条）。
+字段：`text`（256 token 固定切块）→ AnchorBank；`compressed_text`（LLMLingua-2 预压缩，~62 token）→ FusionBank。
+**无需在训练时运行 LLMLingua**：数据已预压缩，直接 tokenize 即可。
+
 ```python
-# 每个 Epoch 的两阶段流程
-for epoch in range(router_config.max_epochs):
+# training/phase1_router.py — train_phase1()
+accelerator = Accelerator(
+    gradient_accumulation_steps=cfg.train.phase1_gradient_accumulation_steps,
+    mixed_precision="bf16" if cfg.train.bf16 else "no",
+)
 
-    # ── Phase A: 数据与索引更新（Main Process） ──
-    texts = sample(corpus, N=router_config.knowledge_num)
-    facts = compressor.compress_batch(texts)            # LLMLingua 压缩
-    store.update_all(tokenize(facts), tokenize_truncate(texts))  # 更新双 Bank
-    result = clustering.fit(
-        encoder.encode_mean(store.anchor_bank).cpu().numpy(),
-        num_keys=int(router_config.knowledge_num ** 0.5),
-    )
-    pkm.update_keys(result.row_keys, result.col_keys)   # 更新 Keys
-    store.update_index(result)                          # 重建倒排索引
-    broadcast_to_all_ranks(store)
+for epoch in range(cfg.train.phase1_max_epochs):
 
-    # ── Phase B: 路由训练（所有 ranks） ──
-    for batch in router_dataloader:
-        q_emb = get_query_embedding(batch["questions"])    # [B, D]
-        target_ids = batch["knowledge_ids"]                # [B]（Ground Truth 条目 ID）
+    # ── Phase A: 数据采样 + 重聚类（主进程执行）──
+    if accelerator.is_main_process:
+        rows = sampler.sample_epoch_data(seed=epoch)          # List[{text, compressed_text}]
+        anchor_ids, fusion_ids = tokenize_parquet_batch(      # 无 LLMLingua，直接 tokenize
+            rows, tokenizer,
+            anchor_length=128,   # text → AnchorBank
+            fusion_length=64,    # compressed_text → FusionBank
+        )
+        store.fusion_bank.update_all(fusion_ids)              # 更新双 Bank
+        store.anchor_bank.update_all(anchor_ids)
+        store.compact_and_recluster(encoder)                  # 编码 + K-Means + 倒排索引
+        router.pkm.update_keys(store.row_centroids,           # 更新 PKM Keys
+                               store.col_centroids)
+        id_to_rowcol = store.get_rowcol_labels()              # [N, 2]，每条知识的聚类标签
 
-        # 获取 teacher soft labels（KL 监督）
-        teacher_row, teacher_col = compute_teacher_labels(target_ids)  # [B, √N]
+    # 多卡广播 store 状态 + id_to_rowcol
+    id_to_rowcol = broadcast_store_state(accelerator, store, id_to_rowcol, N)
 
-        out = router(q_emb, store)
-        scores_1, scores_2 = out.coarse_scores              # [B, √N] × 2
+    # ── Phase B: 路由自监督训练（所有 ranks 并行）──
+    # 自监督：每条文本既是知识（存入 store），也是 query（路由目标）
+    dataset = RouterTrainDataset(anchor_ids, id_to_rowcol)
+    for batch in DataLoader(dataset, batch_size=64, shuffle=True):
 
-        # 损失计算
+        q_emb = encoder.encode_mean(batch["anchor_ids"], batch["anchor_mask"])  # [B, D]，frozen
+
+        # Teacher logits：anchor embedding 与 cluster centroids 的相似度（非 label smoothing）
+        teacher_log1, teacher_log2 = compute_teacher_logits(q_emb, pkm, temperature=0.1)
+
+        out = router(q_emb, store)                            # RouterOutput
+
+        # 精排局部索引（target 未在粗排候选中 → -100，fine_loss 忽略）
+        target_local = compute_target_local_idx(batch["entry_id"], out.candidates)
+
+        # 损失
         ce_loss = CE(scores_1, target_row) + CE(scores_2, target_col)
-        kl_loss = KL(scores_1.softmax(-1), teacher_row) + \
-                  KL(scores_2.softmax(-1), teacher_col)
-        coarse_loss = (1 - alpha) * ce_loss + alpha * kl_loss   # alpha=0.2
-
-        fine_loss = CE(out.fine_scores, target_local_idx)
-
+        kl_loss = KL(log_softmax(scores_1), softmax(teacher_log1)) + ...  # KL 蒸馏
+        coarse_loss = (1 - 0.2) * ce_loss + 0.2 * kl_loss
+        # 全 miss 时 fine_loss=0（避免 all-ignore 导致 NaN）
+        fine_loss = CE(out.fine_scores, target_local, ignore_index=-100) if any_hit else 0
         total_loss = coarse_loss + fine_loss
-        total_loss.backward(); optimizer.step()
+
+        accelerator.backward(total_loss)
+        optimizer.step(); scheduler.step()
+
+    # Epoch 评估（Recall@1/4/16）+ SwanLab 上报 + checkpoint 保存
+    recall = evaluate_recall_at_k(router, store, dataset, encoder, device, Ks=[1, 4, 16])
+    if recall[1] > best_recall1:
+        save_checkpoint(accelerator, router, store, epoch, recall, cfg, best=True)
 ```
 
 ### 2.3 Phase 2/3 Fusion 训练循环
@@ -1174,30 +1200,29 @@ for batch in fusion_dataloader:
 
 | 参数 | Phase 1 (Router) | Phase 2 (Fusion 预训练) | Phase 3 (SFT) |
 |------|-----------------|------------------------|---------------|
-| **数据** | 知识库文本对 | FineWeb-Edu | MedQA train |
+| **数据** | FineWeb-Edu 预压缩 Parquet（`data/compressed/v2/`） | FineWeb-Edu | MedQA train |
 | **lr** | 1e-3 | 3e-4 | 1e-4 |
 | **warmup** | 200 steps | 100 steps | 50 steps |
 | **调度器** | Cosine decay | Cosine decay | Cosine decay |
 | **batch_size/卡** | 64 | 32 | 16 |
-| **梯度累积** | 1 | 4 | 1 |
+| **梯度累积** | 8 | 4 | 1 |
 | **混合精度** | bf16 | bf16 | bf16 |
 | **梯度裁剪** | 1.0 | 1.0 | 1.0 |
 | **早停** | 无 | 无 | patience=3 |
-| **GPU** | 2×（6,7） | 2×（6,7） | 2×（6,7） |
+| **GPU** | 单卡 GPU 6（可扩展至 6,7） | 2×（6,7） | 2×（6,7） |
 | **可训练** | PKM + FeatureAdapter + RefinedSelector | AttentionInjection × 4 + KnowledgeEncoder | 同 Phase 2 |
-| **冻结** | Qwen3 全量 | Qwen3 + Router | Qwen3 + Router |
+| **冻结** | Qwen3 全量 + KnowledgeEncoder | Qwen3 + Router | Qwen3 + Router |
+| **启动** | `bash scripts/run_phase1_router.sh` | — | — |
 
 ### 2.5 训练管线构建依赖
 
-训练管线要求所有 §1.1-1.10 模块完成后才可运行：
-
-| Phase | 依赖模块 | main.py 子命令 |
-|-------|---------|---------------|
-| Phase 0 知识构建 | §1.2,§1.3,§1.5 | `build-knowledge` |
-| Phase 1 Router 训练 | §1.7（含 §1.4-1.6） | `train --phase 1` |
-| Phase 2 Fusion 预训练 | §1.9（含 §1.8） | `train --phase 2` |
-| Phase 3 SFT | §1.10 | `train --phase 3` |
-| 评测 | §1.10 | `eval` |
+| Phase | 实现文件 | 依赖模块 | main.py 子命令 | 状态 |
+|-------|---------|---------|---------------|------|
+| Phase 1 Router 训练 | `training/phase1_router.py` | §1.2,§1.4-1.7 全部已实现 | `train --phase 1` | ✅ 已实现 |
+| Phase 2 Fusion 预训练 | — | §1.8,§1.9 | `train --phase 2` | ⬜ 未实现 |
+| Phase 3 SFT | — | §1.9,§1.10 | `train --phase 3` | ⬜ 未实现 |
+| Phase 0 知识构建 | — | §1.2,§1.3,§1.5 | `build-knowledge` | ⬜ 未实现 |
+| 评测 | `evaluation/compare_eval.py` | §1.10 | `eval` | ✅ 已实现 |
 
 ---
 
@@ -1836,7 +1861,7 @@ ExplicitLM-LoRA/
 ├── config.py                            # §1.1 Config dataclass 定义
 ├── config/
 │   ├── default.yaml                     # 全量非敏感配置（必须写全）
-│   └── model_configs/                   # 0.6B/4B/7B 的模型特定配置
+│   └── default.yaml                     # 全量非敏感配置（含 swanlab/phase1 字段）
 ├── models/                              # 融合模块
 │   ├── __init__.py
 │   ├── qwen_wrapper.py                  # §1.3 KnowledgeEncoder（Qwen3 前 6 层）
@@ -1850,37 +1875,44 @@ ExplicitLM-LoRA/
 │   ├── feature_adapter.py              # §1.6 FeatureAdapter
 │   ├── refined_selector.py             # §1.6 RefinedSelector（精排）
 │   └── model.py                         # §1.7 MemoryRouter（整合）
-├── data_builder/                        # Phase 0 数据构建
-│   ├── compressor.py                    # LLMLingua-2 压缩器封装
-│   ├── data_loader.py                   # 流式数据加载（FineWeb-Edu）
-│   └── parallel_pipeline.py            # 多 GPU 并行构建（N=1M）
 ├── training/                            # 训练器
-│   ├── router_trainer.py               # Phase 1 Router 训练（RouterLoss）
-│   ├── fusion_trainer.py               # Phase 2/3 Fusion 训练（FusionLoss）
-│   └── dataset.py                       # ExplicitDataset + MedQADataset
+│   ├── __init__.py
+│   └── phase1_router.py                # §2.2 Phase 1 Router 训练循环（Accelerate + SwanLab）
+│                                        #   ParquetEpochSampler, tokenize_parquet_batch,
+│                                        #   RouterTrainDataset, compute_teacher_logits,
+│                                        #   compute_router_loss, evaluate_recall_at_k,
+│                                        #   run_phase_a, broadcast_store_state, train_phase1
 ├── evaluation/                          # 评测
-│   ├── compare_eval.py                  # E4 八组对比实验
-│   └── run_eval.py                      # E1-E7 评测入口
-├── utils/
-│   ├── logger_system.py                 # log_msg, log_json, ensure, log_exception
-│   └── helpers.py                       # 通用工具函数
-├── scripts/                             # 训练脚本
-│   ├── run_phase0_build.sh              # Phase 0 知识构建
-│   ├── run_phase1_router.sh             # Phase 1 Router 训练
-│   ├── run_phase2_fusion.sh             # Phase 2 Fusion 预训练
-│   ├── run_phase3_sft.sh                # Phase 3 SFT
-│   └── run_compare_eval.sh             # E4 对比实验
+│   ├── compare_eval.py                  # 四组对比实验（Group 1-4）
+│   ├── explicit_lm.py                   # lm-eval wrapper（5 种 mode）
+│   └── run_lm_eval.py                   # lm-eval runner
+├── scripts/                             # 训练/评测脚本
+│   └── run_phase1_router.sh             # Phase 1 Router 训练一键启动
+│                                        #   （单卡: GPU_IDS=6，双卡: NUM_GPUS=2 GPU_IDS=6,7）
 ├── tests/
 │   ├── unit/
-│   │   ├── test_memory_bank.py          # DualKnowledgeStore 增删索引
-│   │   ├── test_product_key_memory.py   # PKM 检索正确性
-│   │   ├── test_clustering.py           # 聚类平衡性 + 近似分配
-│   │   ├── test_attention_injection.py  # 零初始化 + 残差
-│   │   └── test_modified_qwen.py        # Hook 注入 + forward pass
+│   │   ├── test_memory_bank.py          # DualKnowledgeStore
+│   │   ├── test_memory_gate.py          # ProductKeyMemory
+│   │   ├── test_clustering.py           # SubspaceClustering
+│   │   ├── test_feature_adapter.py      # FeatureAdapter
+│   │   ├── test_refined_selector.py     # RefinedSelector
+│   │   ├── test_router_model.py         # MemoryRouter
+│   │   ├── test_qwen_wrapper.py         # KnowledgeEncoder
+│   │   ├── test_injection_modules.py    # AttentionInjection
+│   │   ├── test_modified_model.py       # ModifiedQwen
+│   │   ├── test_pipeline.py             # ExplicitLMPipeline
+│   │   ├── test_config.py               # Config 解析
+│   │   └── test_phase1_router.py        # §2.2 Phase 1 训练工具函数
 │   ├── integration/
-│   │   ├── test_router_pipeline.py      # Router 端到端检索
-│   │   └── test_full_pipeline.py        # 完整推理管线
-│   └── outputs/                         # Agent 测试 MD 输出
+│   │   ├── test_pkm_flow.py             # PKM 端到端
+│   │   ├── test_clustering_flow.py      # 聚类端到端
+│   │   ├── test_refined_selector_flow.py
+│   │   ├── test_router_model_flow.py    # Router 端到端
+│   │   ├── test_injection_flow.py       # 注入模块端到端
+│   │   ├── test_modified_model_flow.py  # ModifiedQwen 端到端
+│   │   ├── test_pipeline_flow.py        # 完整推理管线
+│   │   └── test_phase1_router_flow.py   # §2.2 Phase B 训练 + checkpoint
+│   └── outputs/                         # 集成测试 Markdown 报告
 ├── data/                                # 数据集（不提交）
 ├── checkpoints/                         # 模型权重（不提交）
 │   ├── phase1_best/                     # Router 最优权重
@@ -1902,10 +1934,10 @@ config.py ← (所有模块依赖)
 router/memory_bank.py ← router/memory_gate.py
                       ← router/refined_selector.py
                       ← router/model.py
-                      ← data_builder/*.py
+                      ← training/phase1_router.py
 
 router/clustering.py ← router/memory_bank.py
-                     ← training/router_trainer.py
+                     ← training/phase1_router.py (compact_and_recluster 内部调用)
 
 router/feature_adapter.py ← router/model.py
 
@@ -1913,18 +1945,20 @@ router/refined_selector.py ← router/model.py
 
 router/model.py ← models/qwen_wrapper.py
                 ← pipeline.py
-                ← training/router_trainer.py
+                ← training/phase1_router.py
 
 models/qwen_wrapper.py ← models/modified_model.py
                        ← router/model.py
+                       ← training/phase1_router.py (encoder, frozen)
 
 models/injection_modules.py ← models/modified_model.py
 
 models/modified_model.py ← pipeline.py
-                         ← training/fusion_trainer.py
 
 pipeline.py ← main.py
             ← evaluation/compare_eval.py
+
+training/phase1_router.py ← main.py (train --phase 1)
 ```
 
 ### 4.3 Python 依赖
