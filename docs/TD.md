@@ -290,48 +290,77 @@ class DualKnowledgeStore:
 ### 1.3 models/qwen_wrapper.py — 知识编码器
 
 **文件**: `models/qwen_wrapper.py`
+**状态**: ✅ 已实现（12 个测试全部通过）
 **职责**: 封装 Qwen3 前 N 层作为知识编码器，将知识 token IDs 上下文化为稠密向量供注入。
 
+#### `load_base_model(model_path: str, bf16: bool) -> AutoModelForCausalLM`
+
+加载 Qwen3 基础模型并冻结所有参数。`model_path` 支持本地路径（如 `"Qwen3-0.6B"`）或 HuggingFace Hub 名称。
+
+#### `class KnowledgeEncoder(nn.Module)`
+
 ```python
-class KnowledgeEncoder(nn.Module):
-    """Qwen3 前 encoder_depth 层 + Final RMSNorm，编码知识 token 序列。"""
-
-    def __init__(self, base_model: AutoModelForCausalLM, encoder_depth: int):
-        """
-        从 base_model 中提取前 encoder_depth 层（共享权重，解冻训练）:
-          self.embed_tokens = base_model.model.embed_tokens  # 冻结
-          self.layers = base_model.model.layers[:encoder_depth]  # 解冻
-          self.norm = RMSNorm(hidden_dim)  # 独立训练
-        注意: base_model 其余层仍保持冻结。
-        """
-
-    def forward(self, knowledge_ids: Tensor, attention_mask: Tensor) -> Tensor:
-        """
-        Args:
-            knowledge_ids:   [B, K_f] — 来自 Fusion Bank 的 token IDs
-            attention_mask:  [B, K_f] — padding mask（0 为 pad）
-        Returns:
-            [B, K_f, D] — 上下文化的知识表示
-        实现:
-            h = embed_tokens(knowledge_ids)   → [B, K_f, D]
-            for layer in self.layers:
-                h = layer(h, mask)            → [B, K_f, D]
-            h = self.norm(h)                  → [B, K_f, D]
-        """
-
-    def encode_mean(self, knowledge_ids: Tensor, attention_mask: Tensor) -> Tensor:
-        """
-        平均池化版本，用于 FeatureAdapter 输入:
-            [B, K_a, D] → mean pool (masked) → [B, D]
-        """
+def __init__(self, base_model: AutoModelForCausalLM, encoder_depth: int, hidden_dim: int):
+    # 共享权重（均冻结）
+    self.embed_tokens = base_model.model.embed_tokens
+    self.layers = nn.ModuleList(list(base_model.model.layers[:encoder_depth]))
+    self.rotary_emb = base_model.model.rotary_emb   # ⚠️ 必须保留：transformers 4.51.0
+                                                     # Qwen3Attention.forward 要求外部传入
+                                                     # position_embeddings，不接受 None
+    # 独立权重（可训练）
+    self.norm = copy.deepcopy(base_model.model.norm)
+    self._freeze_all()  # 冻结所有共享组件，norm 保持可训练
 ```
+
+```python
+def forward(self, knowledge_ids: Tensor, attention_mask: Tensor) -> Tensor:
+    """
+    Args:
+        knowledge_ids:   [B, K] LongTensor — 来自 FusionBank / AnchorBank 的 token IDs
+        attention_mask:  [B, K] LongTensor — 1=有效，0=padding
+    Returns:
+        [B, K, D] FloatTensor — 上下文化的知识表示
+    实现（双向注意力，无 causal mask）:
+        Phase 1: h = embed_tokens(knowledge_ids)              # [B, K, D]
+        Phase 2: position_ids = arange(K).expand(B)          # [B, K]
+        Phase 3: cos, sin = self.rotary_emb(h, position_ids) # 外部计算后传入各层
+        Phase 4: attn_bias = _build_attention_mask(...)       # [B, 1, 1, K]，pad→-inf
+        Phase 5: for layer in self.layers:
+                     h = layer(h, attn_bias, position_ids,
+                               position_embeddings=(cos, sin))  # 直接返回 Tensor
+        Phase 6: h = self.norm(h)
+    """
+```
+
+> **Qwen3 4.51.0 接口注意事项**:
+> - `Qwen3DecoderLayer.forward` 直接返回 `torch.Tensor`（非元组），不要用 `[0]` 取
+> - `Qwen3Attention.forward` 的 `position_embeddings` 参数直接解包，不能为 `None`
+> - `Qwen3Attention` 内部的 rotary 相关属性名为 `rotary_fn`（apply 函数），`rotary_emb` 在 `base_model.model` 上
+
+```python
+def encode_mean(self, knowledge_ids: Tensor, attention_mask: Tensor) -> Tensor:
+    """masked mean pooling → [B, D]，供 AnchorBank.get_embeddings 调用"""
+    h = self.forward(knowledge_ids, attention_mask)     # [B, K, D]
+    mask_float = attention_mask.float().unsqueeze(-1)   # [B, K, 1]
+    return (h * mask_float).sum(1) / mask_float.sum(1).clamp(min=1.0)
+```
+
+#### 其他接口
+
+| 方法 | 说明 |
+|------|------|
+| `unfreeze_layers()` | Phase 2 开始时调用，解冻前 encoder_depth 层 |
+| `device` (property) | 返回当前设备，供 `AnchorBank.get_embeddings` 的 `.to(encoder.device)` |
+| `_freeze_all()` | 内部：冻结 embed_tokens / layers / rotary_emb |
+| `_build_attention_mask(mask, dtype)` | 内部：padding mask → additive bias `[B, 1, 1, K]` |
 
 **关键设计**:
 - encoder_depth=6（Qwen3-0.6B 共 28 层，用前 6 层）
 - 这 6 层在 Phase 2 开始时**解冻**，与 Injection 模块联合训练
-- 知识编码器输出 `[B, K_f, D]` 在每个注入层**复用**（编码一次，注入四次）
+- `self.norm` 深拷贝（独立权重），不与 base_model 共享，全程可训练
+- 双向注意力（无 causal mask），适合知识文本编码
 
-**依赖**: transformers（AutoModelForCausalLM）, torch
+**依赖**: transformers（AutoModelForCausalLM）, torch, copy（标准库）
 
 ---
 
