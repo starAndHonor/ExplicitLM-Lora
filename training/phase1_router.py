@@ -498,42 +498,38 @@ def evaluate_recall_at_k(
 # ─────────────────────────────────────────────────────
 
 
-def run_phase_a(
+def tokenize_and_update_banks(
     epoch: int,
     sampler: ParquetEpochSampler,
     store: "DualKnowledgeStore",
-    encoder: "KnowledgeEncoder",
-    router: "MemoryRouter",
-    cfg: "Config",
     tokenizer: AutoTokenizer,
-) -> Tuple[torch.Tensor, torch.Tensor, List[Dict[str, str]]]:
+    cfg: "Config",
+) -> torch.Tensor:
     """
-    Phase A：数据采样 → tokenize → 更新 Store → 重聚类 → 更新 PKM Keys。
+    Phase A 的 1-3 步：采样 → tokenize → 更新双 Bank。
 
-    在主进程上执行（多卡场景下通过 Accelerate 广播结果）。
+    所有 rank 均可独立调用：相同 epoch seed 保证各 rank 得到完全一致的数据。
+    因 tokenize 为确定性操作，各 rank 本地 anchor_bank / fusion_bank 完全一致，
+    无需通过广播同步，从而让各 rank 并行完成这一阶段（~2 分钟），
+    避免非主进程在等待主进程完成 recluster（~8 分钟）时长时间空等。
 
     参数：
-        epoch:     当前 epoch 编号（用作 seed）
+        epoch:     当前 epoch 编号（用作 seed，保证多卡一致性）
         sampler:   ParquetEpochSampler 实例
-        store:     DualKnowledgeStore（in-place 更新）
-        encoder:   KnowledgeEncoder（frozen，用于 compact_and_recluster 内部编码）
-        router:    MemoryRouter（更新 pkm.row_keys/col_keys）
-        cfg:       Config 配置对象
+        store:     DualKnowledgeStore（in-place 更新 anchor_bank / fusion_bank）
         tokenizer: Qwen3 tokenizer
+        cfg:       Config 配置对象
 
     返回：
-        id_to_rowcol: [N, 2] torch.long — 每条知识的 (row, col) cluster 标签
-        anchor_ids:   [N, anchor_length] torch.long — 供 RouterTrainDataset 使用
-        rows:         原始 dict 列表（含 text/compressed_text，Phase B 可复用）
+        anchor_ids: [N, anchor_length] torch.long（CPU，供 RouterTrainDataset 使用）
     """
     N = cfg.router.knowledge_num
-    chunk_size = cfg.data.phase1_recluster_chunk_size
 
     # ── Step 1: 采样文本 ──
     t0 = time.time()
     rows = sampler.sample_epoch_data(seed=epoch)
     assert len(rows) == N, f"Phase A 采样数量不符：期望 {N}，实际 {len(rows)}"
-    print(f"[Phase A 1/6] 采样完成：{N} 条 ({time.time() - t0:.1f}s)")
+    print(f"[Phase A 1/4] 采样完成：{N} 条 ({time.time() - t0:.1f}s)")
 
     # ── Step 2: tokenize ──
     t0 = time.time()
@@ -544,36 +540,80 @@ def run_phase_a(
         fusion_length=cfg.model.fusion_length,
         batch_size=cfg.data.phase1_tokenize_batch_size,
     )
-    # anchor_ids: [N, 128], fusion_ids: [N, 64]
-    print(f"[Phase A 2/6] Tokenize 完成 ({time.time() - t0:.1f}s)")
+    # anchor_ids: [N, anchor_length], fusion_ids: [N, fusion_length]
+    print(f"[Phase A 2/4] Tokenize 完成 ({time.time() - t0:.1f}s)")
 
     # ── Step 3: 更新双 Bank（全量覆盖，Phase 1 每 epoch 重新采样）──
     store.fusion_bank.update_all(fusion_ids)
     store.anchor_bank.update_all(anchor_ids)
     store.valid_mask[:N] = True
     store.next_free = N
-    print(f"[Phase A 3/6] Bank 更新完成")
+    print(f"[Phase A 3/4] Bank 更新完成")
 
-    # ── Step 4: 全量重聚类（编码 anchor → 子空间聚类 → 重建倒排索引）──
+    del fusion_ids
+    gc.collect()
+
+    return anchor_ids
+
+
+def run_phase_a_recluster(
+    store: "DualKnowledgeStore",
+    encoder: "KnowledgeEncoder",
+    router: "MemoryRouter",
+    cfg: "Config",
+) -> torch.Tensor:
+    """
+    Phase A 的 4-6 步：全量重聚类 → 更新 PKM Keys → 构建 id_to_rowcol。
+
+    仅由主进程（rank 0）执行，耗时约 8 分钟（编码 N=1M 条 anchor）。
+    完成后通过 broadcast_store_state() 将聚类结果同步到所有 rank。
+
+    参数：
+        store:   DualKnowledgeStore（bank 已在 tokenize_and_update_banks 中更新）
+        encoder: KnowledgeEncoder（frozen，用于 compact_and_recluster 内部编码）
+        router:  MemoryRouter（更新 pkm.row_keys/col_keys）
+        cfg:     Config 配置对象
+
+    返回：
+        id_to_rowcol: [N, 2] torch.long — 每条知识的 (row, col) cluster 标签
+    """
+    chunk_size = cfg.data.phase1_recluster_chunk_size
+
+    # ── Step 4: 全量重聚类 + 生成 embedding_cache ──
     t0 = time.time()
-    print(f"[Phase A 4/6] 开始 compact_and_recluster (chunk_size={chunk_size}) ...")
+    print(f"[Phase A 4/4] 开始 compact_and_recluster (chunk_size={chunk_size}) ...")
     store.compact_and_recluster(encoder, chunk_size=chunk_size)
-    print(f"[Phase A 4/6] compact_and_recluster 完成 ({time.time() - t0:.1f}s)")
+    print(f"[Phase A 4/4] compact_and_recluster 完成 ({time.time() - t0:.1f}s)")
 
     # ── Step 5: 更新 PKM Keys（必须在 recluster 之后，row/col centroids 已刷新）──
     assert store.row_centroids is not None, "recluster 后 row_centroids 不应为 None"
     router.pkm.update_keys(store.row_centroids, store.col_centroids)
-    print(f"[Phase A 5/6] PKM Keys 更新完成")
+    print(f"[Phase A 5→] PKM Keys 更新完成")
 
     # ── Step 6: 构建 id_to_rowcol 映射 ──
     id_to_rowcol = store.get_rowcol_labels()  # [N, 2]
-    print(f"[Phase A 6/6] id_to_rowcol 构建完成")
+    print(f"[Phase A 6→] id_to_rowcol 构建完成")
 
-    # ── Step 7: 释放 tokenize 临时张量 ──
-    del fusion_ids
-    gc.collect()
+    return id_to_rowcol
 
-    return id_to_rowcol, anchor_ids, rows
+
+def run_phase_a(
+    epoch: int,
+    sampler: ParquetEpochSampler,
+    store: "DualKnowledgeStore",
+    encoder: "KnowledgeEncoder",
+    router: "MemoryRouter",
+    cfg: "Config",
+    tokenizer: AutoTokenizer,
+) -> Tuple[torch.Tensor, torch.Tensor, List[Dict[str, str]]]:
+    """
+    Phase A 完整版（向后兼容接口，内部调用 tokenize_and_update_banks + run_phase_a_recluster）。
+
+    仅供单进程或测试场景使用。多卡训练请使用拆分版接口。
+    """
+    anchor_ids = tokenize_and_update_banks(epoch, sampler, store, tokenizer, cfg)
+    id_to_rowcol = run_phase_a_recluster(store, encoder, router, cfg)
+    return id_to_rowcol, anchor_ids, []
 
 
 # ─────────────────────────────────────────────────────
@@ -783,26 +823,31 @@ def broadcast_store_state(
         assert id_to_rowcol is not None
         return id_to_rowcol.to(accelerator.device)
 
-    # 广播 store 的关键 buffer（供非主进程使用）
+    # 广播 store 的聚类结果 buffer（供非主进程使用）
+    # 注：fusion_bank.data / anchor_bank.data 不再广播——各 rank 已通过 tokenize_and_update_banks
+    #     独立构建（相同 seed，确定性结果），无需同步。
     dev = accelerator.device
     num_keys_sq = store._num_keys * store._num_keys
 
-    for attr, shape, dtype in [
-        ("fusion_bank.data", (n, store.fusion_bank.fusion_length), torch.long),
-        ("anchor_bank.data", (n, store.anchor_bank.anchor_length), torch.long),
-    ]:
-        obj = store
-        for part in attr.split("."):
-            obj = getattr(obj, part)
+    # 广播 embedding_cache（[N, D] bf16，供 MemoryRouter.forward() 快速路径使用）
+    # 先广播 D 维度（标量），避免非主进程无法推断 D
+    D_tensor = torch.tensor(
+        [store.embedding_cache.shape[1] if store.embedding_cache is not None else 0],
+        dtype=torch.long,
+        device=dev,
+    )
+    dist.broadcast(D_tensor, src=0)
+    D = int(D_tensor.item())
+    if D > 0:
         if accelerator.is_main_process:
-            buf = obj[:n].to(dev)
+            ec_buf = store.embedding_cache.to(dev)  # [N, D] bf16 → GPU
         else:
-            buf = torch.zeros(shape, dtype=dtype, device=dev)
-        dist.broadcast(buf, src=0)
+            ec_buf = torch.zeros((n, D), dtype=torch.bfloat16, device=dev)
+        dist.broadcast(ec_buf, src=0)
         if not accelerator.is_main_process:
-            obj[:n].copy_(buf)
+            store.embedding_cache = ec_buf.cpu()  # 存回 CPU
 
-    # 仅广播始终非 None、shape 固定的三个属性；row/col centroids 通过 PKM keys 在外部广播
+    # 广播始终非 None、shape 固定的三个属性；row/col centroids 通过 PKM keys 在外部广播
     for attr, shape, dtype in [
         ("inverted_index", (n,), torch.long),
         ("cluster_offsets", (num_keys_sq + 1,), torch.long),
@@ -946,31 +991,30 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
     for epoch in range(cfg.train.phase1_max_epochs):
         t_epoch_start = time.time()
 
-        # ── Phase A: 数据更新 + 重聚类（主进程执行）──
+        # ── Phase A Step 1-3: 所有 rank 独立采样+tokenize（相同 seed 保证一致性）──
+        # 各 rank 并行完成（~2 分钟），无需等待主进程
         if accelerator.is_main_process:
-            print(f"[Phase1] Epoch {epoch} — Phase A: 采样 + 重聚类")
-            id_to_rowcol, anchor_ids, _ = run_phase_a(
-                epoch, sampler, store, encoder, unwrapped_router, cfg, tokenizer
-            )
+            print(f"[Phase1] Epoch {epoch} — Phase A Step 1-3: 所有 rank 采样 + tokenize")
+        anchor_ids_dev = tokenize_and_update_banks(epoch, sampler, store, tokenizer, cfg)
+
+        # ── Phase A Step 4-6: 只有 rank 0 做重聚类（~8 分钟）──
+        if accelerator.is_main_process:
+            print(f"[Phase1] Epoch {epoch} — Phase A Step 4-6: 重聚类 + PKM Keys")
+            id_to_rowcol = run_phase_a_recluster(store, encoder, unwrapped_router, cfg)
             id_to_rowcol = id_to_rowcol.to(device)
-            anchor_ids_dev = anchor_ids  # 保持 CPU，Dataset 直接用
         else:
             id_to_rowcol = None
-            anchor_ids_dev = torch.zeros(N, cfg.model.anchor_length, dtype=torch.long)
 
-        # ── 多卡广播 store 状态 ──
+        # ── 多卡广播 store 状态（聚类结果 + embedding_cache + PKM keys）──
         id_to_rowcol = broadcast_store_state(accelerator, store, id_to_rowcol, N)
-        # 广播 PKM 聚类 Keys（register_buffer，永不为 None；rank 0 已在 run_phase_a 中 update_keys）
+        # 广播 PKM 聚类 Keys（register_buffer；rank 0 已在 run_phase_a_recluster 中 update_keys）
         if accelerator.num_processes > 1:
             import torch.distributed as dist
             dist.barrier()
             dist.broadcast(unwrapped_router.pkm.row_keys, src=0)
             dist.broadcast(unwrapped_router.pkm.col_keys, src=0)
             dist.barrier()
-        # anchor_ids_dev 无需单独广播：anchor_bank 已在 broadcast_store_state 中同步
-        # 对标参考项目（train_router.py）：所有 rank 直接从已广播的 store buffer 读取
-        anchor_ids_dev = store.anchor_bank.data[:N].cpu()
-        # 与参考项目对齐：广播全部完成后等待所有 rank 就绪再进 Phase B
+        # 广播全部完成后等待所有 rank 就绪再进 Phase B
         accelerator.wait_for_everyone()
 
         # ── Phase B: 路由训练 ──
@@ -989,6 +1033,9 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
         epoch_ce_sum = 0.0
         epoch_kl_sum = 0.0
         epoch_fine_sum = 0.0
+        epoch_acc_sum = 0.0
+        epoch_row_acc_sum = 0.0
+        epoch_col_acc_sum = 0.0
         n_batches = 0
 
         for batch in loader:
@@ -1032,14 +1079,25 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
+            # 粗排准确率（PKM coarse_scores argmax 与 target 比较）
+            with torch.no_grad():
+                pred_row = out.coarse_scores[0].argmax(dim=-1)  # [B]
+                pred_col = out.coarse_scores[1].argmax(dim=-1)  # [B]
+                row_acc = (pred_row == target_row_b).float().mean()
+                col_acc = (pred_col == target_col_b).float().mean()
+                acc = ((pred_row == target_row_b) & (pred_col == target_col_b)).float().mean()
+
             global_step += 1
             epoch_loss_sum += float(loss.detach())
             epoch_ce_sum += float(ce_loss)
             epoch_kl_sum += float(kl_loss)
             epoch_fine_sum += float(fine_loss)
+            epoch_acc_sum += float(acc)
+            epoch_row_acc_sum += float(row_acc)
+            epoch_col_acc_sum += float(col_acc)
             n_batches += 1
 
-            # 定步上报
+            # 定步上报（swanlab）
             if global_step % cfg.swanlab.log_every_n_steps == 0:
                 log_swanlab(
                     accelerator,
@@ -1053,13 +1111,42 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
                     },
                 )
 
+            # 定步打印 acc 指标（print + swanlab，频率由 phase1_log_acc_steps 控制）
+            if global_step % cfg.swanlab.phase1_log_acc_steps == 0 and accelerator.is_main_process:
+                avg_acc = epoch_acc_sum / n_batches
+                avg_row_acc = epoch_row_acc_sum / n_batches
+                avg_col_acc = epoch_col_acc_sum / n_batches
+                avg_step_loss = epoch_loss_sum / n_batches
+                print(
+                    f"[Step {global_step}] loss={avg_step_loss:.4f} "
+                    f"ce={epoch_ce_sum / n_batches:.4f} kl={epoch_kl_sum / n_batches:.4f} "
+                    f"| acc={avg_acc:.4f} row_acc={avg_row_acc:.4f} col_acc={avg_col_acc:.4f}"
+                )
+                log_swanlab(
+                    accelerator,
+                    cfg.swanlab.enabled,
+                    global_step,
+                    {
+                        "train/step_acc": float(acc),
+                        "train/step_row_acc": float(row_acc),
+                        "train/step_col_acc": float(col_acc),
+                        "train/avg_acc": avg_acc,
+                        "train/avg_row_acc": avg_row_acc,
+                        "train/avg_col_acc": avg_col_acc,
+                    },
+                )
+
         # ── Epoch 结束：释放内存 ──
         del loader
         gc.collect()
         torch.cuda.empty_cache()
 
         # ── Epoch 验证 + Checkpoint ──
-        avg_loss = epoch_loss_sum / max(n_batches, 1)
+        n_b = max(n_batches, 1)
+        avg_loss = epoch_loss_sum / n_b
+        avg_acc = epoch_acc_sum / n_b
+        avg_row_acc = epoch_row_acc_sum / n_b
+        avg_col_acc = epoch_col_acc_sum / n_b
         recall = evaluate_recall_at_k(
             unwrapped_router, store, dataset, encoder, device, Ks=[1, 4, 16]
         )
@@ -1069,6 +1156,7 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
         if accelerator.is_main_process:
             print(
                 f"[Phase1] Epoch {epoch} | loss={avg_loss:.4f} "
+                f"| acc={avg_acc:.4f} row_acc={avg_row_acc:.4f} col_acc={avg_col_acc:.4f} "
                 f"| Recall@1={recall[1]:.4f} @4={recall[4]:.4f} @16={recall[16]:.4f} "
                 f"| {t_elapsed:.1f}s"
             )
@@ -1079,9 +1167,12 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
                 global_step,
                 {
                     "train/epoch_loss": avg_loss,
-                    "train/epoch_ce_loss": epoch_ce_sum / max(n_batches, 1),
-                    "train/epoch_kl_loss": epoch_kl_sum / max(n_batches, 1),
-                    "train/epoch_fine_loss": epoch_fine_sum / max(n_batches, 1),
+                    "train/epoch_ce_loss": epoch_ce_sum / n_b,
+                    "train/epoch_kl_loss": epoch_kl_sum / n_b,
+                    "train/epoch_fine_loss": epoch_fine_sum / n_b,
+                    "train/epoch_acc": avg_acc,
+                    "train/epoch_row_acc": avg_row_acc,
+                    "train/epoch_col_acc": avg_col_acc,
                     "eval/recall@1": recall[1],
                     "eval/recall@4": recall[4],
                     "eval/recall@16": recall[16],

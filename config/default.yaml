@@ -111,6 +111,8 @@ swanlab:
   enabled: true
   # 每隔多少训练步上报一次指标
   log_every_n_steps: 50
+  # Phase 1 每隔多少步打印 acc/row_acc/col_acc 并上报 SwanLab
+  phase1_log_acc_steps: 1000
 
 eval:
   # MedQA 知识映射文件（question → compressed_knowledge）

@@ -103,6 +103,9 @@ def _make_mock_store() -> MagicMock:
         side_effect=lambda ids: torch.zeros(ids.shape[0], FUSION_LENGTH, dtype=torch.long)
     )
     store.next_free = KNOWLEDGE_NUM
+    # 显式置 None：使 MemoryRouter.forward() 走慢速路径（从 token IDs 重新编码）
+    # 若需测试快速路径，请在测试用例中单独设置 store.embedding_cache = torch.zeros(...)
+    store.embedding_cache = None
     return store
 
 

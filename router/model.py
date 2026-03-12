@@ -150,23 +150,33 @@ class MemoryRouter(nn.Module):
         C = candidates.shape[1]
 
         # ─── Step 3: KnowledgeEncoder + FeatureAdapter — 候选侧编码 ──────────────
-        # 3a. 从 AnchorBank 取候选原文 token IDs：[B, C, K_a]
-        # anchor_bank.data 存储在 CPU；candidates 在 GPU，需先移到 CPU 再索引
-        anchor_ids = store.anchor_bank.data[candidates.cpu()]  # [B, C, K_a]，CPU
-        K_a = anchor_ids.shape[2]
+        # 优先使用 embedding_cache（Phase A 预计算，零 encoder 调用）；
+        # 退化路径：cache 为 None 时从 token IDs 重新编码（首次调用前或测试场景）
+        if store.embedding_cache is not None:
+            # 快速路径：按 entry ID 查表 → [B*C, D] bf16 → GPU fp32/bf16
+            cands_cpu = candidates.cpu()  # [B, C]
+            cand_embs = store.embedding_cache[cands_cpu.reshape(-1)]  # [B*C, D] bf16 CPU
+            cand_embs = cand_embs.to(dtype=query_embedding.dtype, device=query_embedding.device)  # [B*C, D]
+            # adapter 2D 路径：[B*C, D] → [B*C, adapter_dim]
+            cand_vecs_flat = self.adapter(cand_embs)  # [B*C, adapter_dim]
+        else:
+            # 慢速路径（fallback）：从 token IDs 重新过 encoder
+            # anchor_bank.data 存储在 CPU；candidates 在 GPU，需先移到 CPU 再索引
+            anchor_ids = store.anchor_bank.data[candidates.cpu()]  # [B, C, K_a]，CPU
+            K_a = anchor_ids.shape[2]
 
-        # 3b. 展平为 [B*C, K_a]，移回 GPU 供编码器使用
-        flat_ids = anchor_ids.reshape(B * C, K_a).to(query_embedding.device)  # [B*C, K_a]
+            # 展平为 [B*C, K_a]，移回 GPU 供编码器使用
+            flat_ids = anchor_ids.reshape(B * C, K_a).to(query_embedding.device)  # [B*C, K_a]
 
-        # 3c. 构造 attention mask（0=pad，1=有效）
-        flat_mask = (flat_ids != 0).long()  # [B*C, K_a]
+            # 构造 attention mask（0=pad，1=有效）
+            flat_mask = (flat_ids != 0).long()  # [B*C, K_a]
 
-        # 3d. KnowledgeEncoder 上下文化（Qwen3 前 encoder_depth 层 + 双向注意力）
-        cand_enc = self.encoder.forward(flat_ids, flat_mask)  # [B*C, K_a, D]
+            # KnowledgeEncoder 上下文化（Qwen3 前 encoder_depth 层 + 双向注意力）
+            cand_enc = self.encoder.forward(flat_ids, flat_mask)  # [B*C, K_a, D]
 
-        # 3e. FeatureAdapter mean pooling + 投影 → [B*C, adapter_dim]
-        # adapter 3D 路径：[B*C, K_a, D] → masked mean pool → [B*C, adapter_dim]
-        cand_vecs_flat = self.adapter(cand_enc, flat_mask.bool())  # [B*C, adapter_dim]
+            # FeatureAdapter mean pooling + 投影 → [B*C, adapter_dim]
+            # adapter 3D 路径：[B*C, K_a, D] → masked mean pool → [B*C, adapter_dim]
+            cand_vecs_flat = self.adapter(cand_enc, flat_mask.bool())  # [B*C, adapter_dim]
 
         # 3f. 恢复批次维度 [B, C, adapter_dim]
         cand_vecs = cand_vecs_flat.view(B, C, self._adapter_dim)  # [B, C, adapter_dim]

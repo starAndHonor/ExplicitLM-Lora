@@ -283,6 +283,10 @@ class DualKnowledgeStore:
         self.pca_mean: Optional[torch.Tensor] = None  # [D]
         self.row_centroids: Optional[torch.Tensor] = None  # [num_keys, D//2]
         self.col_centroids: Optional[torch.Tensor] = None  # [num_keys, D//2]
+        # embedding_cache: compact_and_recluster 后保存的 anchor 嵌入向量
+        # 形状 [N_valid, D]，bf16，CPU 存储（N=1M × D=1024 × 2 bytes ≈ 2GB）
+        # 用于 MemoryRouter.forward() 的候选侧快速路径，避免每 batch 重新编码
+        self.embedding_cache: Optional[torch.Tensor] = None  # [N_valid, D] bf16 CPU
 
         # Phase 4: 动态更新状态
         self.next_free: int = 0
@@ -483,6 +487,10 @@ class DualKnowledgeStore:
                 encoder, valid_mask_compact, chunk_size=chunk_size
             )  # [N_valid, D]
             print(f"[Recluster] Phase 2 编码完成 ({time.time() - t2:.1f}s)")
+
+            # 缓存嵌入向量（bf16 CPU），供 MemoryRouter.forward() 快速路径查表
+            self.embedding_cache = embeddings.to(torch.bfloat16)
+            print(f"[Cache] embedding_cache 已保存 shape={list(self.embedding_cache.shape)}, dtype=bfloat16")
 
             # Phase 3: 独立子空间聚类
             t3 = time.time()
