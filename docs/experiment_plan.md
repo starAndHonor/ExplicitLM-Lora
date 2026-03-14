@@ -81,40 +81,63 @@ Router 是端到端系统的入口。如果路由检索质量差，即使 Fusion
 ```
 知识库: N=1M 条目（双 Bank）
 查询: 评测集的每道题
-指标: Recall@K（K=1,4,16,64），即真实对应知识是否在 Top-K 候选中
+指标: Recall@K（K=1,4,16,256），即真实对应知识是否在 Top-K 候选中
 
 对比条件:
-  ① 粗排 only — MemoryGate Top-16 clusters → ~64 候选
+  ① 粗排 only — MemoryGate Top-16 clusters → 最多 256 候选（num_candidates=256）
   ② 粗排 + 精排 — RefinedSelector 从候选中精选 Top-1
   ③ 随机 baseline — 随机选取（下界参考）
 
 指标解读:
-  Recall@1   → 精排后 Top-1 命中率（端到端使用此值）
-  Recall@K   → 粗排候选的召回率曲线（K=4,16,64）
-  精排提升   → Recall@1(粗排+精排) - Recall@1(粗排 only)
-  负载均衡   → max/mean cluster size 比值（>3 则失衡）
+  Recall@1    → 粗排候选集排名第一的命中率（粗排直接排序精度）
+  Recall@4/16 → 粗排候选的召回率曲线
+  Recall@256  → 粗排全量候选召回率（候选池上界，= fine selector 实际可见范围）
+  final_acc   → 精排端到端准确率（端到端使用此值，= 粗排+精排联合输出命中率）
+  精排提升    → final_acc - Recall@1(粗排 only)
+  负载均衡    → max/mean cluster size 比值（>3 则失衡）
 ```
 
 **判断标准**：
-- Recall@64 > 80%：粗排质量合格
-- Recall@1 > 50%：端到端可用
-- Recall@1 < 30%：Router 训练失败，需诊断
+- Recall@256 > 80%：粗排全量召回合格（候选池包含正确答案）
+- final_acc > 50%：端到端可用
+- final_acc < 30%：Router 训练失败，需诊断
 
 **三模型对比预期**：更大模型的 embedding 质量更好 → Recall 更高。
 
+### Phase 1 训练评估（自监督，FineWeb-Edu，Qwen3-0.6B，epoch=16）
+
+> **数据源**：`checkpoints/phase1_best/meta.txt`，epoch=16 最优 checkpoint。
+> **评测域**：FineWeb-Edu 自监督（query = knowledge = 同一文本）。
+> **与 E1 的关系**：此为训练阶段 sanity check；正式 E1 需在 MedQA + 医学知识库上另行运行。
+
+| 指标 | 含义 | 值 | E1 判定 |
+|------|------|-----|---------|
+| 粗排 Recall@1 | 粗排候选集排名第一 = 正确答案 | 50.9% | — |
+| 粗排 Recall@4 | 粗排前4中含正确答案 | 62.1% | — |
+| 粗排 Recall@16 | 粗排前16中含正确答案 | 80.6% | — |
+| 粗排 Recall@256（估算） | 全候选池含正确答案（≈ final_acc / cond_fine_acc） | ~93.5% | ✅ >80% |
+| **final_acc（端到端）** | 精排最终输出 = 正确答案 | **90.3%** | ✅ >50% |
+| cond_fine_acc | GT 在候选池中时精排命中率 | 96.57% | ✅ 精排有效 |
+
+**分析**：
+- **端到端准确率 90.3%** 大幅超过 50% 合格线，Phase 1 Router 训练质量优秀
+- **瓶颈在粗排召回**：粗排 @16=80.6%，全候选池（256条）召回估算 ~93.5%；精排几乎不犯错（cond_fine_acc=96.57%）
+- **粗排直接排序能力有限**：recall@1=50.9% 远低于 final_acc=90.3%，说明正确答案常在候选池中但不靠前，精排发挥了关键提升作用
+- **⚠ 待验证**：以上为训练域（FineWeb-Edu）自监督结果；跨域（MedQA 查询 × 医学知识库）性能需正式 E1 实验确认
+
 ### E1-1 Recall@K 曲线（MedQA，N=1M）
 
-| 模型 | 方法 | Recall@1 | Recall@4 | Recall@16 | Recall@64 |
-|------|------|----------|----------|-----------|-----------|
-| 0.6B | 粗排 only | | | | |
-| 0.6B | 粗排 + 精排 | | | | |
-| 0.6B | 随机 baseline | | | | |
-| 4B | 粗排 only | | | | |
-| 4B | 粗排 + 精排 | | | | |
-| 4B | 随机 baseline | | | | |
-| 7B | 粗排 only | | | | |
-| 7B | 粗排 + 精排 | | | | |
-| 7B | 随机 baseline | | | | |
+| 模型 | 方法 | Recall@1（粗排精度） | Recall@4 | Recall@16 | Recall@256（粗排全量） | final_acc（端到端） |
+|------|------|---------------------|----------|-----------|----------------------|-------------------|
+| 0.6B | 粗排 only | | | | | — |
+| 0.6B | 粗排 + 精排 | | | | | |
+| 0.6B | 随机 baseline | | | | | |
+| 4B | 粗排 only | | | | | — |
+| 4B | 粗排 + 精排 | | | | | |
+| 4B | 随机 baseline | | | | | |
+| 7B | 粗排 only | | | | | — |
+| 7B | 粗排 + 精排 | | | | | |
+| 7B | 随机 baseline | | | | | |
 
 ### E1-2 Cluster 负载均衡
 

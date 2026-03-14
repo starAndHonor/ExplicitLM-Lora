@@ -69,7 +69,7 @@ class RouterConfig:
     query_dim: int                 # 1024（query_proj 输出维度）
     key_proj_dim: int              # 512（行/列键投影维度，= dim // 2）
     adapter_dim: int               # 512（FeatureAdapter 输出维度）
-    num_candidates: int            # 32（粗排固定输出候选数）
+    num_candidates: int            # 256（粗排固定输出候选数，截断/填充至固定长度）
     temperature: float             # 0.1（PKM 路由温度）
     recluster_threshold: float     # 0.1（触发 recluster 的变更比例）
     max_candidates_per_cell: int   # -1=全量倒排索引；>0=每格上限（=1时退化为1:1映射）

@@ -150,7 +150,7 @@ Candidate Generation:
     start = cluster_offsets[grid_idx]
     count = cluster_counts[grid_idx]
     data_ids = inverted_index[start : start+count]
-  → all_candidates [B, ~64]
+  → all_candidates [B, ~256]  ← 截断/填充至 num_candidates=256
 ```
 
 ### 4.2 独立子空间聚类
@@ -410,7 +410,7 @@ for batch in dataloader:
 ┌─── Step 1: 路由检索 ───────────────────────────────────┐
 │ x = qwen.embed(query)                                  │
 │ x_pooled = feature_adapter(x)           → [1, 512]     │
-│ candidates = memory_gate.coarse_search(x) → [1, ~64]   │
+│ candidates = memory_gate.coarse_search(x) → [1, ~256]  │
 │   (路由基于 Anchor Bank embedding 构建的聚类索引)        │
 │ best_id = refined_selector(x_pooled, candidates) → int │
 │ knowledge_ids = fusion_bank[best_id]    → [1, K_f]     │
