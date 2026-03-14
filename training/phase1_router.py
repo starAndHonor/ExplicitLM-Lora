@@ -290,34 +290,44 @@ def compute_teacher_logits(
     anchor_emb: torch.Tensor,
     pkm: "ProductKeyMemory",
     temperature: float,
+    pca_matrix: Optional[torch.Tensor] = None,
+    pca_mean: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     用 anchor embedding 计算 teacher 软标签（知识自身与 cluster centroids 的相似度）。
 
     ISN Teacher（Independent Subspace Normalization）：
-    直接将 anchor embedding 前后各半作为子空间，与 cluster centroids 点积，
-    完全不经过任何可训练投影层，对齐参考项目 MemoryGate 的 teacher 设计。
+    若提供 pca_matrix/pca_mean，先对 anchor_emb 做 PCA 旋转再交错分割，
+    与 SubspaceClustering.fit() 的子空间完全对齐（偶数 PC → row，奇数 PC → col）；
+    否则回退为直接前后切分（首 epoch 聚类完成前的兜底）。
 
     Student 路径：anchor_emb → query_proj（可训练）→ key_proj → scores
-    Teacher 路径：anchor_emb[:, :D//2] → F.normalize → row_keys（non-trainable）→ logits
-    因此 KL(student || teacher) != 0，提供真实梯度信号。
+    Teacher 路径：PCA_rotate(anchor_emb)[:, 0::2] → F.normalize → row_keys → logits
+    因此 KL(student || teacher) 提供真实梯度信号，且 teacher 与聚类子空间对齐。
 
     参数：
-        anchor_emb: [B, D] — frozen encoder 输出的 anchor 文本 embedding
-        pkm:        ProductKeyMemory 实例（含 row_keys/col_keys non-trainable buffer）
+        anchor_emb:  [B, D] — frozen encoder 输出的 anchor 文本 embedding
+        pkm:         ProductKeyMemory 实例（含 row_keys/col_keys non-trainable buffer）
         temperature: PKM softmax 温度（与训练时保持一致）
+        pca_matrix:  [D, D] float — PCA 旋转矩阵（来自 store.pca_matrix），可为 None
+        pca_mean:    [D] float — PCA 均值向量（来自 store.pca_mean），可为 None
 
     返回：
         teacher_logits_1: [B, num_keys] — row cluster logits（未 softmax）
         teacher_logits_2: [B, num_keys] — col cluster logits（未 softmax）
     """
-    # Phase 1: ISN（Independent Subspace Normalization）
-    # 直接切分 anchor embedding 前后各半，对应 Row/Col 子空间
-    # 与 SubspaceClustering.fit() 的交错分割保持一致（偶数 PC → Row，奇数 PC → Col），
-    # 但此处 anchor_emb 是原始 encoder 输出（未经 PCA 旋转），直接前后切分
-    D = anchor_emb.shape[-1]
-    sub1 = F.normalize(anchor_emb[:, : D // 2], p=2, dim=-1)  # [B, D//2]
-    sub2 = F.normalize(anchor_emb[:, D // 2 :], p=2, dim=-1)  # [B, D//2]
+    # Phase 1: 计算 teacher 子空间
+    if pca_matrix is not None and pca_mean is not None:
+        # PCA 对齐路径：旋转到主成分空间后交错分割，与聚类子空间完全一致
+        x_c = anchor_emb - pca_mean.to(dtype=anchor_emb.dtype, device=anchor_emb.device)
+        x_rot = x_c @ pca_matrix.to(dtype=anchor_emb.dtype, device=anchor_emb.device)  # [B, D]
+        sub1 = F.normalize(x_rot[:, 0::2], p=2, dim=-1)  # 偶数 PC → row 子空间 [B, D//2]
+        sub2 = F.normalize(x_rot[:, 1::2], p=2, dim=-1)  # 奇数 PC → col 子空间 [B, D//2]
+    else:
+        # 兜底路径：直接前后切分（首 epoch 聚类前使用）
+        D = anchor_emb.shape[-1]
+        sub1 = F.normalize(anchor_emb[:, : D // 2], p=2, dim=-1)  # [B, D//2]
+        sub2 = F.normalize(anchor_emb[:, D // 2 :], p=2, dim=-1)  # [B, D//2]
 
     # Phase 2: cluster centroids（non-trainable buffer），不经过任何可训练投影层
     row_cent = F.normalize(
@@ -334,33 +344,6 @@ def compute_teacher_logits(
     return teacher_logits_1, teacher_logits_2
 
 
-def compute_target_local_idx(
-    target_entry_ids: torch.Tensor,
-    candidates: torch.Tensor,
-) -> torch.Tensor:
-    """
-    在 PKM 粗排候选集中查找 target entry ID 的局部索引。
-
-    若 target 未被粗排命中（PKM 漏检），返回 -100，fine_loss 对该样本忽略。
-
-    参数：
-        target_entry_ids: [B] long — 每个样本的 ground truth 知识条目 ID
-        candidates:       [B, C] long — PKM 粗排输出的候选 ID
-
-    返回：
-        [B] long — target 在 candidates 中的局部索引（0-based），未命中为 -100
-
-    实现：
-        对每个 batch 样本做线性搜索（C 通常 ≤ 32，开销可忽略）
-    """
-    B, C = candidates.shape
-    local_idx = torch.full((B,), -100, dtype=torch.long, device=candidates.device)
-    for b in range(B):
-        match = (candidates[b] == target_entry_ids[b]).nonzero(as_tuple=True)[0]
-        if match.numel() > 0:
-            local_idx[b] = match[0]
-    return local_idx
-
 
 def compute_router_loss(
     out: "RouterOutput",
@@ -368,27 +351,30 @@ def compute_router_loss(
     target_col: torch.Tensor,
     teacher_logits_1: torch.Tensor,
     teacher_logits_2: torch.Tensor,
-    target_local_idx: torch.Tensor,
+    entry_ids: torch.Tensor,
     alpha: float = 0.2,
     temperature: float = 0.1,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     计算 Router 完整训练损失。
 
-    损失组成（参照 TD.md §2.2 伪代码）：
+    损失组成：
         coarse_loss = (1-α)·CE(粗排) + α·KL(teacher 软标签)
-        fine_loss   = CE(精排，ignore_index=-100 跳过未命中样本)
+        fine_loss   = CE(精排，GT 已在 forward 中强制插入，不需要 ignore_index)
         total_loss  = coarse_loss + fine_loss
 
+    精排 CE 基于 out.fine_scores，其中空位已被 RefinedSelector 打为 -inf，
+    softmax 后概率为 0，cross_entropy 天然忽略这些空位。
+
     参数：
-        out:              RouterOutput（含 coarse_scores 和 fine_scores）
+        out:              RouterOutput（含 coarse_scores、fine_scores、candidates、cand_mask）
         target_row:       [B] long — 粗排目标 row cluster
         target_col:       [B] long — 粗排目标 col cluster
         teacher_logits_1: [B, num_keys] — teacher row logits（未 softmax，已内含 /temperature）
         teacher_logits_2: [B, num_keys] — teacher col logits（未 softmax，已内含 /temperature）
-        target_local_idx: [B] long — 精排目标局部索引（-100=未命中）
+        entry_ids:        [B] long — 每条样本的 GT 知识条目 ID
         alpha:            KL 蒸馏权重（默认 0.2）
-        temperature:      softmax 温度，CE 和 KL student 均除以此值（对齐参考项目）
+        temperature:      softmax 温度，CE 和 KL student 均除以此值
 
     返回：
         total_loss:  scalar — 总损失（用于 backward）
@@ -404,9 +390,7 @@ def compute_router_loss(
     ce_loss = ce_row + ce_col
 
     # Phase 2: KL 蒸馏（student log_softmax vs teacher softmax）
-    # student 也除以 temperature，确保 student 分布与 teacher 分布在相同温度标度下
-    # 修复前：student T=1.0，teacher T=0.1 → KL 常驻 6+，不随训练收敛
-    # 修复后：两者均 T=0.1 → 学生学好后 KL → 0，梯度自然衰减
+    # 两者均使用相同 temperature，确保分布标度一致，学生收敛后 KL → 0
     log_row = F.log_softmax(scores_1 / temperature, dim=-1)
     log_col = F.log_softmax(scores_2 / temperature, dim=-1)
     teacher_prob_1 = F.softmax(teacher_logits_1, dim=-1)
@@ -417,17 +401,13 @@ def compute_router_loss(
 
     coarse_loss = (1 - alpha) * ce_loss + alpha * kl_loss
 
-    # Phase 3: 精排 CE（跳过未命中样本）
-    # 当所有样本均 miss（全为 -100）时 cross_entropy 返回 nan，需特判为 0
-    valid_mask = target_local_idx != -100
-    if valid_mask.any():
-        fine_loss = F.cross_entropy(
-            out.fine_scores, target_local_idx, ignore_index=-100
-        )
-    else:
-        fine_loss = torch.zeros(
-            1, device=out.fine_scores.device, dtype=out.fine_scores.dtype
-        ).squeeze()
+    # Phase 3: 精排 CE
+    # GT 已在 MemoryRouter.forward 中强制插入候选集，
+    # target_local = 向量化查找 GT 在有效候选中的局部索引
+    # 必须同时用 cand_mask 屏蔽 padding（padding 填 0，与 entry_id=0 会误匹配）
+    match_mask = (out.candidates == entry_ids.unsqueeze(1)) & out.cand_mask  # [B, C]
+    target_local = match_mask.int().argmax(dim=1)  # [B]
+    fine_loss = F.cross_entropy(out.fine_scores, target_local)
 
     total_loss = coarse_loss + fine_loss
 
@@ -499,9 +479,14 @@ def evaluate_recall_at_k(
         for b in range(batch_size):
             if total >= n_eval:
                 break
-            gt_in_cands = bool((candidates[b] == entry_ids[b]).any().item())
+            # 用 valid_mask 过滤空位，避免空位填充的 0 与 entry_id=0 误匹配
+            cand_mask_b = out.cand_mask[b]  # [C] bool
+            valid_cands_b = candidates[b][cand_mask_b]  # [num_valid]
+            gt_in_cands = bool((valid_cands_b == entry_ids[b]).any().item())
             for k in Ks:
-                if entry_ids[b] in candidates[b, :k]:
+                # top-k 候选中仅计算有效位
+                valid_top_k = candidates[b, :k][cand_mask_b[:k]]
+                if entry_ids[b] in valid_top_k:
                     hits[k] += 1
             hit = bool((out.best_id[b] == entry_ids[b]).item())
             if hit:
@@ -1082,26 +1067,27 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
                     q_emb = encoder.encode_mean(anchor_ids_b, anchor_mask_b)  # [B, D]
 
                 # teacher logits（anchor 自身 embedding 与 cluster centroids 的相似度）
+                # 传入 store 的 PCA 状态，使 teacher 与聚类子空间对齐
                 teacher_log1, teacher_log2 = compute_teacher_logits(
                     q_emb.detach(),
                     unwrapped_router.pkm,
                     cfg.router.temperature,
+                    pca_matrix=store.pca_matrix,
+                    pca_mean=store.pca_mean,
                 )
 
-                # router forward（粗排 + 精排）
-                out = unwrapped_router(q_emb, store)
+                # router forward（粗排 + 精排 + GT 强制插入）
+                # 传入 target_entry_ids 触发 GT 强制插入逻辑，确保精排有有效训练信号
+                out = unwrapped_router(q_emb, store, target_entry_ids=entry_ids_b)
 
-                # 精排局部索引
-                target_local = compute_target_local_idx(entry_ids_b, out.candidates)
-
-                # 损失计算
+                # 损失计算（不再需要 compute_target_local_idx，GT 强制插入后必然在候选中）
                 loss, ce_loss, kl_loss, fine_loss = compute_router_loss(
                     out,
                     target_row_b,
                     target_col_b,
                     teacher_log1,
                     teacher_log2,
-                    target_local,
+                    entry_ids_b,
                     temperature=cfg.router.temperature,
                 )
 
@@ -1129,8 +1115,11 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
                     out.coarse_scores[1].topk(_K, dim=-1).indices == target_col_b.unsqueeze(1)
                 ).any(dim=1).float().mean()
                 # 向量化计算条件精排准确率（O(B×C)，无 Python 循环）
-                gt_in_cands = (out.candidates == entry_ids_b.unsqueeze(1)).any(dim=1)  # [B] bool
-                recall_256 = gt_in_cands.float().mean()  # GT 落入 256 候选集的比例
+                # 用 cand_mask 过滤空位，避免空位 0 与 entry_id=0 的误匹配
+                gt_in_cands = (
+                    (out.candidates == entry_ids_b.unsqueeze(1)) & out.cand_mask
+                ).any(dim=1)  # [B] bool
+                recall_256 = gt_in_cands.float().mean()  # GT 落入有效候选集的比例
                 cond_denom = gt_in_cands.sum().float()
                 cond_fine_acc = (
                     ((out.best_id == entry_ids_b) & gt_in_cands).sum().float() / cond_denom
