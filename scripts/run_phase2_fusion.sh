@@ -22,6 +22,19 @@ export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
+ENV_FILE="${PROJECT_ROOT}/.env"
+
+# ── 项目环境变量（如 SwanLab API Key） ──
+if [ -f "${ENV_FILE}" ]; then
+    # 仅加载 .env 中的简单 KEY=VALUE 行，避免影响脚本严格模式
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+    set +a
+    echo "[Phase2Fusion] 已加载项目环境变量: ${ENV_FILE}"
+else
+    echo "[Phase2Fusion] 未找到项目 .env，继续使用当前 shell 环境变量"
+fi
 
 echo "[Phase2Fusion] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, num_processes=${NUM_GPUS}"
 echo "[Phase2Fusion] Config: ${CONFIG}"
@@ -48,21 +61,20 @@ CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints"
 mkdir -p "${CHECKPOINT_DIR}"
 echo "[Phase2Fusion] Checkpoint 目录: ${CHECKPOINT_DIR}"
 
-# ── 激活 Conda 环境 ──
-eval "$(conda shell.bash hook)"
-conda activate ExplicitLLM
-
 # ── 检查依赖 ──
-python -c "import accelerate; import swanlab" 2>/dev/null || {
+conda run --no-capture-output -n ExplicitLLM python -c "import accelerate; import swanlab; import pandas" 2>/dev/null || {
     echo "[INFO] 安装缺失依赖..."
-    pip install accelerate swanlab -q
+    conda run --no-capture-output -n ExplicitLLM pip install accelerate swanlab pandas -q
 }
 
 # ── Accelerate 启动 ──
 # 注意：用户参数 "$@" 必须放在子命令 train --phase 2 之前，
 # 因为 main.py 的 --override 使用 nargs="*"，会贪婪消耗后续参数
+# 注意：不能直接用 `conda run ... accelerate launch`
+# 否则可能命中 ~/.local/bin/accelerate，落回系统 Python。
+# 这里强制使用 ExplicitLLM 环境中的 `python -m accelerate.commands.launch`。
 echo "[Phase2Fusion] 启动训练..."
-accelerate launch \
+conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launch \
     --num_processes "${NUM_GPUS}" \
     --mixed_precision bf16 \
     --main_process_port 29501 \
