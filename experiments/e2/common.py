@@ -93,6 +93,7 @@ def build_injection_model(
         base_model=base_model,
         encoder_depth=cfg.model.encoder_depth,
         hidden_dim=cfg.model.hidden_dim,
+        mode=cfg.model.knowledge_encoder_mode,
     )
     injection_method = cfg.model.injection_method.lower()
     if injection_method == "attention":
@@ -121,9 +122,19 @@ def build_injection_model(
 
     state_specs = [
         (model.injection_modules, ckpt_dir / "injection_modules.pt", "injection_modules"),
-        (model.knowledge_encoder.layers, ckpt_dir / "encoder_layers.pt", "knowledge_encoder.layers"),
-        (model.knowledge_encoder.norm, ckpt_dir / "encoder_norm.pt", "knowledge_encoder.norm"),
     ]
+    if not model.knowledge_encoder.uses_qwen3_mode:
+        state_specs.extend(
+            [
+                (model.knowledge_encoder.layers, ckpt_dir / "encoder_layers.pt", "knowledge_encoder.layers"),
+                (model.knowledge_encoder.norm, ckpt_dir / "encoder_norm.pt", "knowledge_encoder.norm"),
+            ]
+        )
+    else:
+        print(
+            f"[{log_prefix}] qwen3 mode active | skip loading knowledge_encoder.layers / knowledge_encoder.norm",
+            flush=True,
+        )
     for module, path, label in state_specs:
         if path.exists():
             state_dict = torch.load(path, map_location="cpu", weights_only=True)

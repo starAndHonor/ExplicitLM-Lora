@@ -49,6 +49,7 @@ VALID_YAML_CONTENT = textwrap.dedent(
       injection_method: "attention"
       injection_layers: [6, 12, 18, 24]
       encoder_depth: 6
+      knowledge_encoder_mode: "trainable"
       fusion_length: 64
       anchor_length: 128
 
@@ -166,6 +167,7 @@ def test_load_from_yaml_only(valid_yaml_file: str) -> None:
     assert cfg.model.hidden_dim == 1024
     assert cfg.model.num_layers == 28
     assert cfg.model.injection_layers == [6, 12, 18, 24]
+    assert cfg.model.knowledge_encoder_mode == "trainable"
     assert isinstance(cfg.model.injection_layers, list)
 
     assert cfg.router.knowledge_num == 1048576

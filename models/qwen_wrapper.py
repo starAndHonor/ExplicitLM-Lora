@@ -5,16 +5,15 @@ models/qwen_wrapper.py — Qwen3 知识编码器
 token IDs 上下文化为稠密知识表示 [B, K_f, D]，供 AttentionInjection 注入。
 
 核心设计：
-  - embed_tokens 与基础模型共享权重，始终冻结
-  - 前 encoder_depth 层与基础模型共享权重，Phase 2 开始时解冻联合训练
-  - self.norm 独立深拷贝，始终可训练
-  - 使用双向注意力（无 causal mask），适合知识文本编码
+  - trainable 模式：显式 mask + 可训练独立 norm + 前 encoder_depth 层可联合训练
+  - qwen3 模式：完全复用旧版 Qwen helper 语义，不训练 encoder
 """
 
 from __future__ import annotations
 
 import copy
 import logging
+from contextlib import nullcontext
 from typing import Tuple
 
 import torch
@@ -72,6 +71,9 @@ class KnowledgeEncoder(nn.Module):
         base_model: 已冻结的 Qwen3 AutoModelForCausalLM 实例（由 load_base_model 返回）
         encoder_depth: 使用 Qwen3 前多少层作为编码器（默认 6）
         hidden_dim: 模型隐藏维度（Qwen3-0.6B 为 1024）
+        mode:
+            - "trainable"：当前主线模式，显式 mask + 独立 norm + 可联合训练
+            - "qwen3"：复用 Qwen encoder helper 语义且不训练
     """
 
     def __init__(
@@ -79,11 +81,20 @@ class KnowledgeEncoder(nn.Module):
         base_model: AutoModelForCausalLM,
         encoder_depth: int,
         hidden_dim: int,
+        mode: str = "trainable",
     ) -> None:
         super().__init__()
 
         self.encoder_depth = encoder_depth
         self.hidden_dim = hidden_dim
+        self.mode = mode.lower()
+        if self.mode == "reference":
+            self.mode = "qwen3"
+        if self.mode not in {"trainable", "qwen3"}:
+            raise ValueError(
+                f"unsupported knowledge encoder mode: {mode} "
+                "(expected 'trainable' or 'qwen3')"
+            )
 
         # Phase 1: 引用共享组件（与 base_model 共享同一批权重对象）
         # embed_tokens: 词嵌入层，始终冻结
@@ -94,18 +105,23 @@ class KnowledgeEncoder(nn.Module):
         # （不可删除：Qwen3Attention.forward 直接解包 position_embeddings，不接受 None）
         self.rotary_emb = base_model.model.rotary_emb
 
-        # Phase 2: 深拷贝 Final RMSNorm，作为独立可训练参数（不共享 base_model 权重）
-        self.norm: nn.Module = copy.deepcopy(base_model.model.norm)
-        for p in self.norm.parameters():
-            p.requires_grad = True
+        if self.mode == "trainable":
+            # trainable: 深拷贝 Final RMSNorm，作为独立可训练参数（不共享 base_model 权重）
+            self.norm: nn.Module = copy.deepcopy(base_model.model.norm)
+            for p in self.norm.parameters():
+                p.requires_grad = True
+        else:
+            # qwen3: 直接复用 base model 的 final norm，不训练 encoder
+            self.norm = base_model.model.norm
 
         # Phase 3: 初始化时冻结所有共享组件
         self._freeze_all()
 
         logger.info(
-            "KnowledgeEncoder 初始化完毕 (encoder_depth=%d, hidden_dim=%d)",
+            "KnowledgeEncoder 初始化完毕 (encoder_depth=%d, hidden_dim=%d, mode=%s)",
             encoder_depth,
             hidden_dim,
+            self.mode,
         )
 
     def _freeze_all(self) -> None:
@@ -113,7 +129,8 @@ class KnowledgeEncoder(nn.Module):
         冻结所有共享组件参数（embed_tokens、layers、rotary_emb）。
 
         由 __init__ 内部调用，无需外部手动调用。
-        self.norm 不受影响，保持 requires_grad=True。
+        trainable 模式下 self.norm 保持 requires_grad=True。
+        qwen3 模式下 self.norm 同样保持冻结。
         """
         for p in self.embed_tokens.parameters():
             p.requires_grad = False
@@ -125,6 +142,10 @@ class KnowledgeEncoder(nn.Module):
         for p in self.rotary_emb.parameters():
             p.requires_grad = False
 
+        if self.mode == "qwen3":
+            for p in self.norm.parameters():
+                p.requires_grad = False
+
     def unfreeze_layers(self) -> None:
         """
         解冻前 encoder_depth 层，供 Phase 2 与 AttentionInjection 联合训练。
@@ -134,9 +155,22 @@ class KnowledgeEncoder(nn.Module):
             - self.embed_tokens 仍然冻结（requires_grad=False）
             - self.norm 保持可训练（不变）
         """
+        if self.mode == "qwen3":
+            logger.info("KnowledgeEncoder 处于 qwen3 模式，跳过解冻 layers")
+            return
         for p in self.layers.parameters():
             p.requires_grad = True
         logger.info("已解冻前 %d 层（联合训练模式已激活）", self.encoder_depth)
+
+    @property
+    def uses_qwen3_mode(self) -> bool:
+        """是否处于 qwen3 兼容模式。"""
+        return self.mode == "qwen3"
+
+    @property
+    def uses_reference_mode(self) -> bool:
+        """兼容旧调用名；等价于 uses_qwen3_mode。"""
+        return self.uses_qwen3_mode
 
     @property
     def device(self) -> torch.device:
@@ -195,44 +229,51 @@ class KnowledgeEncoder(nn.Module):
             Phase 1: 词嵌入查找
             Phase 2: 构造位置 ID（顺序整数）
             Phase 3: 计算旋转位置编码（cos, sin），取第一层 rotary_emb 各层复用
-            Phase 4: 构造 additive attention bias（双向，无 causal mask）
+            Phase 4:
+                - trainable：构造 additive attention bias（双向，无 causal mask）
+                - qwen3：不传显式 mask，完全复用旧版 Qwen helper 语义
             Phase 5: 逐层 Transformer 前向
-            Phase 6: 独立 RMSNorm 归一化
+            Phase 6: RMSNorm 归一化
         """
         b, k = knowledge_ids.shape
 
-        # Phase 1: 词嵌入查找  [B, K_f] → [B, K_f, D]
-        h = self.embed_tokens(knowledge_ids)
+        grad_ctx = torch.no_grad() if self.uses_qwen3_mode else nullcontext()
+        with grad_ctx:
+            # Phase 1: 词嵌入查找  [B, K_f] → [B, K_f, D]
+            h = self.embed_tokens(knowledge_ids)
 
-        # Phase 2: 构造位置 ID  [B, K_f]
-        position_ids = (
-            torch.arange(k, device=knowledge_ids.device)
-            .unsqueeze(0)
-            .expand(b, -1)
-        )
+            # Phase 2: 构造位置 ID  [B, K_f]
+            position_ids = (
+                torch.arange(k, device=knowledge_ids.device)
+                .unsqueeze(0)
+                .expand(b, -1)
+            )
 
-        # Phase 3: 计算旋转位置编码（cos, sin），供各层复用
-        # Qwen3 此版本 Attention.forward 直接解包 position_embeddings，不接受 None
-        cos, sin = self.rotary_emb(h, position_ids)
+            # Phase 3: 计算旋转位置编码（cos, sin），供各层复用
+            # Qwen3 此版本 Attention.forward 直接解包 position_embeddings，不接受 None
+            cos, sin = self.rotary_emb(h, position_ids)
 
-        # Phase 4: 构造 additive attention bias（双向注意力）  [B, 1, 1, K_f]
-        attn_bias = self._build_attention_mask(attention_mask, dtype=h.dtype)
+            if self.uses_qwen3_mode:
+                # 完全复用 Reference helper 语义：不传显式 attention_mask/pad mask
+                for layer in self.layers:
+                    h = layer(h, position_embeddings=(cos, sin))
+            else:
+                # trainable: 构造 additive attention bias（双向注意力）  [B, 1, 1, K_f]
+                attn_bias = self._build_attention_mask(attention_mask, dtype=h.dtype)
 
-        # Phase 5: 逐层 Transformer 前向传播
-        # Qwen3DecoderLayer.forward 直接返回 torch.Tensor（非元组）
-        for layer in self.layers:
-            h = layer(
-                h,
-                attention_mask=attn_bias,
-                position_ids=position_ids,
-                past_key_values=None,
-                use_cache=False,
-                cache_position=None,
-                position_embeddings=(cos, sin),
-            )  # [B, K_f, D]
+                for layer in self.layers:
+                    h = layer(
+                        h,
+                        attention_mask=attn_bias,
+                        position_ids=position_ids,
+                        past_key_values=None,
+                        use_cache=False,
+                        cache_position=None,
+                        position_embeddings=(cos, sin),
+                    )  # [B, K_f, D]
 
-        # Phase 6: 独立 RMSNorm 归一化  [B, K_f, D]
-        h = self.norm(h)
+            # Phase 6: RMSNorm 归一化  [B, K_f, D]
+            h = self.norm(h)
 
         return h
 

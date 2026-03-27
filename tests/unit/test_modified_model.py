@@ -16,7 +16,9 @@ tests/unit/test_modified_model.py — ModifiedQwen 单元测试
 
 from __future__ import annotations
 
+import importlib.util
 import sys
+import types
 from pathlib import Path
 from typing import List
 
@@ -346,3 +348,141 @@ class TestRemoveHooks:
 
         # 验证清空
         assert len(m._hooks) == 0, f"remove_hooks() 后 _hooks 未清空：{m._hooks}"
+
+
+class TestReferenceAlignment:
+    """与 Reference 整机前向的对齐验证。"""
+
+    def test_qwen3_mode_modified_qwen_matches_reference_logits(self, base_model) -> None:
+        """
+        测试：当前 qwen3 模式 + 当前 ModifiedQwen，在注入权重映射后应与 ref ModifiedQwen
+        的最终 logits 完全一致。
+
+        验证点：
+            - 输出 shape 一致
+            - 输出 dtype 一致
+            - logits 逐元素完全一致
+        """
+        logger_mod = types.ModuleType("utils.logger_system")
+        logger_mod.log_msg = lambda *args, **kwargs: None
+        sys.modules["utils.logger_system"] = logger_mod
+
+        ref_root = (
+            PROJECT_ROOT
+            / "Reference"
+            / "Explicit-Lora-fusion"
+            / "models"
+        )
+        orig_models_pkg = sys.modules.get("models")
+        orig_qw = sys.modules.get("models.qwen_wrapper")
+        orig_inj = sys.modules.get("models.injection_modules")
+        orig_mod = sys.modules.get("models.modified_model")
+
+        models_pkg = types.ModuleType("models")
+        sys.modules["models"] = models_pkg
+
+        try:
+            for name in ["qwen_wrapper", "injection_modules"]:
+                path = ref_root / f"{name}.py"
+                spec = importlib.util.spec_from_file_location(f"models.{name}", path)
+                assert spec is not None and spec.loader is not None
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[f"models.{name}"] = mod
+                setattr(models_pkg, name, mod)
+                spec.loader.exec_module(mod)
+
+            mod_path = ref_root / "modified_model.py"
+            spec = importlib.util.spec_from_file_location("models.modified_model", mod_path)
+            assert spec is not None and spec.loader is not None
+            ref_mod = importlib.util.module_from_spec(spec)
+            sys.modules["models.modified_model"] = ref_mod
+            setattr(models_pkg, "modified_model", ref_mod)
+            spec.loader.exec_module(ref_mod)
+            RefModifiedQwen = ref_mod.ModifiedQwen
+        finally:
+            if orig_models_pkg is not None:
+                sys.modules["models"] = orig_models_pkg
+            else:
+                del sys.modules["models"]
+            if orig_qw is not None:
+                sys.modules["models.qwen_wrapper"] = orig_qw
+            if orig_inj is not None:
+                sys.modules["models.injection_modules"] = orig_inj
+            if orig_mod is not None:
+                sys.modules["models.modified_model"] = orig_mod
+
+        encoder = KnowledgeEncoder(
+            base_model=base_model,
+            encoder_depth=ENCODER_DEPTH,
+            hidden_dim=HIDDEN_DIM,
+            mode="qwen3",
+        )
+        cur_modules = nn.ModuleList(
+            [AttentionInjection(hidden_dim=HIDDEN_DIM) for _ in range(NUM_INJECTION)]
+        )
+        cur = ModifiedQwen(
+            base_model=base_model,
+            knowledge_encoder=encoder,
+            injection_modules=cur_modules,
+            injection_layers=INJECTION_LAYERS,
+            pad_token_id=151643,
+        ).eval()
+
+        ref = RefModifiedQwen(
+            model_path=MODEL_PATH,
+            injection_method="attention",
+            injection_layers=INJECTION_LAYERS,
+            device="cpu",
+            encoder_depth=ENCODER_DEPTH,
+            knowledge_adapter=False,
+            num_heads=8,
+            dropout=0.0,
+        ).eval()
+
+        with torch.no_grad():
+            for layer_idx, cur_inj in zip(INJECTION_LAYERS, cur.injection_modules):
+                ref_inj = ref.injection_modules[str(layer_idx)]
+                in_proj_w = ref_inj.cross_attn.in_proj_weight
+                in_proj_b = ref_inj.cross_attn.in_proj_bias
+                cur_inj.W_q.weight.copy_(in_proj_w[:HIDDEN_DIM])
+                cur_inj.W_k.weight.copy_(in_proj_w[HIDDEN_DIM : 2 * HIDDEN_DIM])
+                cur_inj.W_v.weight.copy_(in_proj_w[2 * HIDDEN_DIM :])
+                cur_inj.W_q.bias.copy_(in_proj_b[:HIDDEN_DIM])
+                cur_inj.W_k.bias.copy_(in_proj_b[HIDDEN_DIM : 2 * HIDDEN_DIM])
+                cur_inj.W_v.bias.copy_(in_proj_b[2 * HIDDEN_DIM :])
+                cur_inj.out_proj.weight.copy_(ref_inj.cross_attn.out_proj.weight)
+                cur_inj.out_proj.bias.copy_(ref_inj.cross_attn.out_proj.bias)
+                cur_inj.pre_norm.gamma.copy_(ref_inj.norm.gamma)
+                cur_inj.null_k.copy_(ref_inj.null_k)
+                cur_inj.null_v.copy_(ref_inj.null_v)
+
+        torch.manual_seed(SEED + 10)
+        input_ids = torch.randint(1, VOCAB_SIZE // 2, (B, 32))
+        knowledge_ids = torch.randint(1, VOCAB_SIZE // 2, (B, FUSION_LENGTH))
+        knowledge_ids[:, 40:] = 151643
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            cur_logits = cur(
+                input_ids=input_ids,
+                knowledge_ids=knowledge_ids,
+                attention_mask=attention_mask,
+            ).logits
+            ref_logits = ref(
+                input_ids=input_ids,
+                knowledge_ids=knowledge_ids,
+                attention_mask=attention_mask,
+            )
+
+        diff = (cur_logits - ref_logits).abs()
+
+        assert cur_logits.shape == ref_logits.shape, (
+            f"logits shape 应一致，当前={tuple(cur_logits.shape)}，ref={tuple(ref_logits.shape)}"
+        )
+        assert cur_logits.dtype == ref_logits.dtype, (
+            f"logits dtype 应一致，当前={cur_logits.dtype}，ref={ref_logits.dtype}"
+        )
+        assert torch.equal(cur_logits, ref_logits), (
+            "当前 qwen3 模式整机 logits 应与 ref ModifiedQwen 完全一致，"
+            f"但 max_abs={diff.max().item()} mean_abs={diff.mean().item()}"
+        )

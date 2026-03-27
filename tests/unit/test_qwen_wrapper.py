@@ -16,6 +16,10 @@ tests/unit/test_qwen_wrapper.py — KnowledgeEncoder 集成测试
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+import types
+
 import pytest
 import torch
 
@@ -346,4 +350,89 @@ class TestUnfreezeAndDevice:
         # 测试环境在 CPU 运行
         assert device.type == "cpu", (
             f"测试环境设备应为 cpu，实际为 {device}"
+        )
+
+
+class TestQwen3Mode:
+    """qwen3 模式兼容性验证"""
+
+    def test_qwen3_mode_keeps_layers_and_norm_frozen(self, base_model) -> None:
+        enc = KnowledgeEncoder(
+            base_model=base_model,
+            encoder_depth=ENCODER_DEPTH,
+            hidden_dim=HIDDEN_DIM,
+            mode="qwen3",
+        )
+
+        assert enc.uses_qwen3_mode is True
+        assert enc.uses_reference_mode is True
+        assert enc.norm is base_model.model.norm
+        assert all(p.requires_grad is False for p in enc.layers.parameters())
+        assert all(p.requires_grad is False for p in enc.norm.parameters())
+
+    def test_qwen3_mode_unfreeze_is_noop(self, base_model) -> None:
+        enc = KnowledgeEncoder(
+            base_model=base_model,
+            encoder_depth=ENCODER_DEPTH,
+            hidden_dim=HIDDEN_DIM,
+            mode="qwen3",
+        )
+
+        enc.unfreeze_layers()
+
+        assert all(p.requires_grad is False for p in enc.layers.parameters())
+
+    def test_qwen3_mode_matches_reference_encode_knowledge(self, base_model) -> None:
+        """
+        测试：qwen3 模式的编码输出应与 Reference 的 encode_knowledge 完全一致。
+
+        验证点：
+            - 输出 shape 相同
+            - 输出 dtype 相同
+            - 数值逐元素完全一致（max_abs = 0）
+        """
+        logger_mod = types.ModuleType("utils.logger_system")
+        logger_mod.log_msg = lambda *args, **kwargs: None
+        sys.modules.setdefault("utils.logger_system", logger_mod)
+
+        ref_path = (
+            __import__("pathlib").Path(__file__).resolve().parents[2]
+            / "Reference"
+            / "Explicit-Lora-fusion"
+            / "models"
+            / "qwen_wrapper.py"
+        )
+        spec = importlib.util.spec_from_file_location("ref_qwen_wrapper", ref_path)
+        assert spec is not None and spec.loader is not None
+        ref_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ref_mod)
+        RefQwenWrapper = ref_mod.QwenWrapper
+
+        enc = KnowledgeEncoder(
+            base_model=base_model,
+            encoder_depth=ENCODER_DEPTH,
+            hidden_dim=HIDDEN_DIM,
+            mode="qwen3",
+        ).eval()
+        ref = RefQwenWrapper(model_path=MODEL_PATH, device="cpu", freeze=True).eval()
+
+        ids = torch.randint(1, VOCAB_SIZE // 2, (BATCH_SIZE, FUSION_LENGTH))
+        ids[:, FUSION_LENGTH // 2 :] = 0
+        mask = (ids != 0).long()
+
+        with torch.no_grad():
+            cur_out = enc(ids, mask)
+            ref_out = ref.encode_knowledge(ids, encoder_depth=ENCODER_DEPTH)
+
+        diff = (cur_out - ref_out).abs()
+
+        assert cur_out.shape == ref_out.shape, (
+            f"输出 shape 应一致，当前={tuple(cur_out.shape)}，ref={tuple(ref_out.shape)}"
+        )
+        assert cur_out.dtype == ref_out.dtype, (
+            f"输出 dtype 应一致，当前={cur_out.dtype}，ref={ref_out.dtype}"
+        )
+        assert torch.equal(cur_out, ref_out), (
+            "qwen3 模式输出应与 Reference encode_knowledge 完全一致，"
+            f"但 max_abs={diff.max().item()} mean_abs={diff.mean().item()}"
         )
