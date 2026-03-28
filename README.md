@@ -3,7 +3,7 @@
 本仓库当前常用流程可以分成两部分：
 
 - 训练
-- 实验评测（E1 / E2 / E3）
+- 实验评测（E1 / E2 / E3 / E4 / E5 / E6）
 
 ## 训练
 
@@ -153,9 +153,107 @@ python experiments/e3/run_e3.py \
   --device cuda:0
 ```
 
+### E4 SFT Ablation
+
+跑 `qwen3` 的 `Phase 2/Phase 3`：
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e4/run_e4.py \
+  --config config/default.yaml \
+  --phase1-weights checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --override model.knowledge_encoder_mode=qwen3 \
+  --device cuda:0
+```
+
+跑当前默认 `trainable` 的 `Phase 2/Phase 3`：
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e4/run_e4.py \
+  --config config/default.yaml \
+  --phase1-weights checkpoints/phase2_best \
+  --phase2-weights checkpoints/phase3_best \
+  --device cuda:0
+```
+
+### E5 Knowledge Analysis
+
+跑 `qwen3` 的 `Phase 2/Phase 3`：
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e5/run_e5.py \
+  --config config/default.yaml \
+  --phase1-weights checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --override model.knowledge_encoder_mode=qwen3 \
+  --device cuda:0 \
+  --output results/e5/e5_knowledge_analysis_p2p3_qwen3.json
+```
+
+跑当前默认 `trainable` 的 `Phase 2/Phase 3`：
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e5/run_e5.py \
+  --config config/default.yaml \
+  --phase1-weights checkpoints/phase2_best \
+  --phase2-weights checkpoints/phase3_best \
+  --device cuda:0
+```
+
+如果只想构建 E5 需要的知识映射：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e5/run_e5.py \
+  --config config/default.yaml \
+  --build-only
+```
+
+### E6 Inference Efficiency
+
+跑 `qwen3` 的 `Phase 3 best`：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e6/run_e6.py \
+  --config config/default.yaml \
+  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --override model.knowledge_encoder_mode=qwen3 \
+  --e5-result results/e5/e5_knowledge_analysis_p2p3_qwen3.json \
+  --device cuda:0
+```
+
+跑当前默认 `trainable` 的 `Phase 3 best`：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e6/run_e6.py \
+  --config config/default.yaml \
+  --phase2-weights checkpoints/phase3_best \
+  --device cuda:0
+```
+
 ## 说明
 
 - `qwen3` 模式复用 Qwen3 encoder 与原始 `norm`，因此评测 `qwen3` checkpoint 时要加：
   - `--override model.knowledge_encoder_mode=qwen3`
 - `trainable` 模式是当前默认配置。
+- `scripts/run_experiment_auto.sh` 会根据 checkpoint 自动生成结果文件名。
+- `scripts/run_experiment_suite.sh` 会自动串联实验依赖。
+  - 例如跑 `E3 -> E5 -> E6` 时，会把前面生成的 `E3/E5` 结果路径自动传给 `E6`。
+  - 推荐示例：
+
+```bash
+ENC_MODE=qwen3 \
+FUSION_CKPT=checkpoints/p2_qwen3_10ep/phase2_best \
+PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+EXPERIMENTS="e3 e5 e6" \
+bash scripts/run_experiment_suite.sh
+```
+
 - `result.md` 汇总了当前主要 E1 / E2 / E3 结果。

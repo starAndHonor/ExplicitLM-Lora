@@ -11,10 +11,10 @@ It compares three groups on `medqa`, `arc`, and `mmlu`:
 
 The key derived metric is:
 
-- `sft_cost = phase1_acc - phase2_acc`
+- `sft_effect = phase2_acc - phase1_acc`
 
-Positive `sft_cost` means the SFT stage hurt cross-domain performance relative
-to the pre-SFT fusion checkpoint.
+Positive `sft_effect` means the SFT stage improved cross-domain performance
+relative to the pre-SFT fusion checkpoint.
 
 Example:
 

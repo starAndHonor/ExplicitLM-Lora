@@ -146,7 +146,7 @@ def _build_ablation(results: Dict[str, Any]) -> Dict[str, Any]:
             "phase2_acc": p2_acc,
             "phase1_delta": p1_acc - base_acc,
             "phase2_delta": p2_acc - base_acc,
-            "sft_cost": p1_acc - p2_acc,
+            "sft_effect": p2_acc - p1_acc,
         }
     return ablation
 
@@ -161,7 +161,7 @@ def _print_report(results: Dict[str, Any]) -> None:
         "Phase2",
         "Δ(P1-Base)",
         "Δ(P2-Base)",
-        "SFT cost",
+        "SFT effect",
     )
     logger.info("%s", "-" * 84)
     for ds_name, label in (("medqa", "MedQA"), ("arc", "ARC"), ("mmlu", "MMLU")):
@@ -174,7 +174,7 @@ def _print_report(results: Dict[str, Any]) -> None:
             ab["phase2_acc"] * 100,
             ab["phase1_delta"] * 100,
             ab["phase2_delta"] * 100,
-            ab["sft_cost"] * 100,
+            ab["sft_effect"] * 100,
         )
 
 
@@ -273,4 +273,3 @@ def run_e4_all(
     out.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info("E4 finished | elapsed_sec=%.2f | output=%s", results["elapsed_sec"], out)
     return results
-
