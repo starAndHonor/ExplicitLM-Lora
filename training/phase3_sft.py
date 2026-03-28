@@ -286,7 +286,9 @@ def _save_phase3_checkpoint(
     """
     保存 Phase 3 SFT checkpoint（仅主进程执行）。
 
-    保存内容与格式同 Phase 2（injection_modules.pt + encoder_*.pt + meta.txt）。
+    保存内容与格式同 Phase 2。
+    trainable 模式保存 injection_modules.pt + encoder_*.pt + meta.txt；
+    qwen3 模式仅保存 injection_modules.pt + meta.txt。
 
     参数：
         accelerator:  Accelerate 对象
@@ -307,8 +309,9 @@ def _save_phase3_checkpoint(
     unwrapped = accelerator.unwrap_model(modified_qwen)
 
     torch.save(unwrapped.injection_modules.state_dict(), epoch_dir / "injection_modules.pt")
-    torch.save(unwrapped.knowledge_encoder.layers.state_dict(), epoch_dir / "encoder_layers.pt")
-    torch.save(unwrapped.knowledge_encoder.norm.state_dict(), epoch_dir / "encoder_norm.pt")
+    if not unwrapped.knowledge_encoder.uses_qwen3_mode:
+        torch.save(unwrapped.knowledge_encoder.layers.state_dict(), epoch_dir / "encoder_layers.pt")
+        torch.save(unwrapped.knowledge_encoder.norm.state_dict(), epoch_dir / "encoder_norm.pt")
     (epoch_dir / "meta.txt").write_text(
         f"epoch={epoch}\n"
         f"train_loss={train_loss:.6f}\n"
@@ -321,8 +324,9 @@ def _save_phase3_checkpoint(
         best_dir = ckpt_root / "phase3_best"
         best_dir.mkdir(parents=True, exist_ok=True)
         torch.save(unwrapped.injection_modules.state_dict(), best_dir / "injection_modules.pt")
-        torch.save(unwrapped.knowledge_encoder.layers.state_dict(), best_dir / "encoder_layers.pt")
-        torch.save(unwrapped.knowledge_encoder.norm.state_dict(), best_dir / "encoder_norm.pt")
+        if not unwrapped.knowledge_encoder.uses_qwen3_mode:
+            torch.save(unwrapped.knowledge_encoder.layers.state_dict(), best_dir / "encoder_layers.pt")
+            torch.save(unwrapped.knowledge_encoder.norm.state_dict(), best_dir / "encoder_norm.pt")
         (best_dir / "meta.txt").write_text(
             f"epoch={epoch}\n"
             f"train_loss={train_loss:.6f}\n"
@@ -411,13 +415,17 @@ def _build_modified_qwen_phase3(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # 知识编码器（Phase 3 同样解冻，与 Phase 2 可训练范围一致）
+    # 知识编码器：trainable 模式解冻，与 Phase 2 保持一致；qwen3 模式保持冻结
     encoder = KnowledgeEncoder(
         base_model=base_model,
         encoder_depth=cfg.model.encoder_depth,
         hidden_dim=cfg.model.hidden_dim,
+        mode=cfg.model.knowledge_encoder_mode,
     )
-    encoder.unfreeze_layers()
+    if encoder.uses_qwen3_mode:
+        logger.info("[Phase3SFT] KnowledgeEncoder 使用 qwen3 模式（复用 Qwen encoder，不训练）")
+    else:
+        encoder.unfreeze_layers()
 
     # 注入模块
     if cfg.model.injection_method != "attention":
@@ -458,7 +466,9 @@ def _build_modified_qwen_phase3(
         else:
             logger.warning("[Phase3SFT] injection_modules.pt 不存在，使用随机初始化！")
 
-        if enc_layers_path.exists():
+        if encoder.uses_qwen3_mode:
+            logger.info("[Phase3SFT] qwen3 模式跳过加载 encoder_layers/encoder_norm")
+        elif enc_layers_path.exists():
             modified_qwen.knowledge_encoder.layers.load_state_dict(
                 _load_tensor("encoder_layers.pt")
             )
@@ -466,7 +476,9 @@ def _build_modified_qwen_phase3(
         else:
             logger.warning("[Phase3SFT] encoder_layers.pt 不存在，使用随机初始化！")
 
-        if enc_norm_path.exists():
+        if encoder.uses_qwen3_mode:
+            pass
+        elif enc_norm_path.exists():
             modified_qwen.knowledge_encoder.norm.load_state_dict(
                 _load_tensor("encoder_norm.pt")
             )

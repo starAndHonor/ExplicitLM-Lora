@@ -10,6 +10,9 @@
 #   NUM_GPUS        使用 GPU 数量（默认 2）
 #   GPU_IDS         CUDA_VISIBLE_DEVICES（默认 6,7）
 #   CONFIG          配置文件路径（默认 config/default.yaml）
+#   ENC_MODE        知识编码模式（默认 trainable，可选 qwen3）
+#   EPOCHS          Phase 2 训练轮数（默认 10）
+#   TAG             额外命名标签（可选，如 norm）
 
 set -euo pipefail
 
@@ -23,6 +26,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 ENV_FILE="${PROJECT_ROOT}/.env"
+ENC_MODE="${ENC_MODE:-trainable}"
+EPOCHS="${EPOCHS:-10}"
+TAG="${TAG:-}"
+
+CKP_NAME="p2_${ENC_MODE}_${EPOCHS}ep"
+if [ -n "${TAG}" ]; then
+    CKP_NAME="${CKP_NAME}_${TAG}"
+fi
+CHECKPOINT_PATH="checkpoints/${CKP_NAME}"
 
 # ── 项目环境变量（如 SwanLab API Key） ──
 if [ -f "${ENV_FILE}" ]; then
@@ -39,6 +51,9 @@ fi
 echo "[Phase2Fusion] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, num_processes=${NUM_GPUS}"
 echo "[Phase2Fusion] Config: ${CONFIG}"
 echo "[Phase2Fusion] Project: ${PROJECT_ROOT}"
+echo "[Phase2Fusion] Encoder mode: ${ENC_MODE}"
+echo "[Phase2Fusion] Epochs: ${EPOCHS}"
+echo "[Phase2Fusion] Checkpoint name: ${CKP_NAME}"
 
 # ── 检查预压缩数据目录 ──
 PARQUET_DIR="${PROJECT_ROOT}/data/compressed/v2"
@@ -81,5 +96,8 @@ conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launc
     "${PROJECT_ROOT}/main.py" \
     --config "${CONFIG}" \
     --device cuda \
+    --override model.knowledge_encoder_mode="${ENC_MODE}" \
+    --override train.phase2_max_epochs="${EPOCHS}" \
+    --override paths.checkpoint_dir="${CHECKPOINT_PATH}" \
     "$@" \
     train --phase 2

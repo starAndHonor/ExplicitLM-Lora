@@ -128,10 +128,14 @@ def save_fusion_checkpoint(
     保存 Phase 2 Fusion checkpoint（仅主进程执行）。
 
     保存内容：
-        injection_modules.pt   —— ModifiedQwen.injection_modules.state_dict()
-        encoder_layers.pt      —— KnowledgeEncoder.layers.state_dict()
-        encoder_norm.pt        —— KnowledgeEncoder.norm.state_dict()
-        meta.txt               —— epoch, loss, timestamp
+        trainable 模式：
+            injection_modules.pt   —— ModifiedQwen.injection_modules.state_dict()
+            encoder_layers.pt      —— KnowledgeEncoder.layers.state_dict()
+            encoder_norm.pt        —— KnowledgeEncoder.norm.state_dict()
+            meta.txt               —— epoch, loss, timestamp
+        qwen3 模式：
+            injection_modules.pt   —— ModifiedQwen.injection_modules.state_dict()
+            meta.txt               —— epoch, loss, timestamp
 
     参数：
         accelerator:  Accelerate 对象，用于 is_main_process 判断
@@ -155,14 +159,15 @@ def save_fusion_checkpoint(
         unwrapped.injection_modules.state_dict(),
         epoch_dir / "injection_modules.pt",
     )
-    torch.save(
-        unwrapped.knowledge_encoder.layers.state_dict(),
-        epoch_dir / "encoder_layers.pt",
-    )
-    torch.save(
-        unwrapped.knowledge_encoder.norm.state_dict(),
-        epoch_dir / "encoder_norm.pt",
-    )
+    if not unwrapped.knowledge_encoder.uses_qwen3_mode:
+        torch.save(
+            unwrapped.knowledge_encoder.layers.state_dict(),
+            epoch_dir / "encoder_layers.pt",
+        )
+        torch.save(
+            unwrapped.knowledge_encoder.norm.state_dict(),
+            epoch_dir / "encoder_norm.pt",
+        )
     (epoch_dir / "meta.txt").write_text(
         f"epoch={epoch}\nloss={loss:.6f}\ntimestamp={time.strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
@@ -175,14 +180,15 @@ def save_fusion_checkpoint(
             unwrapped.injection_modules.state_dict(),
             best_dir / "injection_modules.pt",
         )
-        torch.save(
-            unwrapped.knowledge_encoder.layers.state_dict(),
-            best_dir / "encoder_layers.pt",
-        )
-        torch.save(
-            unwrapped.knowledge_encoder.norm.state_dict(),
-            best_dir / "encoder_norm.pt",
-        )
+        if not unwrapped.knowledge_encoder.uses_qwen3_mode:
+            torch.save(
+                unwrapped.knowledge_encoder.layers.state_dict(),
+                best_dir / "encoder_layers.pt",
+            )
+            torch.save(
+                unwrapped.knowledge_encoder.norm.state_dict(),
+                best_dir / "encoder_norm.pt",
+            )
         (best_dir / "meta.txt").write_text(
             f"epoch={epoch}\nloss={loss:.6f}\ntimestamp={time.strftime('%Y-%m-%d %H:%M:%S')}\n"
         )
@@ -262,17 +268,21 @@ def _build_modified_qwen(cfg: Config, device: str) -> Tuple[ModifiedQwen, AutoTo
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Phase 2: 构建知识编码器并解冻前 N 层（联合训练）
+    # Phase 2: 构建知识编码器；trainable 模式解冻前 N 层，qwen3 模式保持冻结
     encoder = KnowledgeEncoder(
         base_model=base_model,
         encoder_depth=cfg.model.encoder_depth,
         hidden_dim=cfg.model.hidden_dim,
+        mode=cfg.model.knowledge_encoder_mode,
     )
-    encoder.unfreeze_layers()
-    logger.info(
-        "[Phase2Fusion] KnowledgeEncoder 已解冻前 %d 层（联合训练模式）",
-        cfg.model.encoder_depth,
-    )
+    if encoder.uses_qwen3_mode:
+        logger.info("[Phase2Fusion] KnowledgeEncoder 使用 qwen3 模式（复用 Qwen encoder，不训练）")
+    else:
+        encoder.unfreeze_layers()
+        logger.info(
+            "[Phase2Fusion] KnowledgeEncoder 已解冻前 %d 层（联合训练模式）",
+            cfg.model.encoder_depth,
+        )
 
     # Phase 3: 构建注入模块（AttentionInjection × N）
     if cfg.model.injection_method != "attention":

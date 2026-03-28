@@ -15,6 +15,10 @@ model:
   injection_layers: [6, 12, 18, 24]
   # 知识编码器使用 Qwen3 前 N 层
   encoder_depth: 6
+  # 知识编码器模式: "trainable" | "qwen3"
+  # trainable = 当前主线（显式 mask + 独立 norm + 可联合训练）
+  # qwen3 = 直接复用 Qwen3 前 N 层与原始 norm，不显式使用知识 mask，不训练 encoder
+  knowledge_encoder_mode: "trainable"
   # Fusion Bank 每条知识的 token 数（LLMLingua 压缩后）
   fusion_length: 64
   # Anchor Bank 每条知识的 token 数（原文截断，用于路由匹配）
@@ -54,7 +58,7 @@ train:
   # Phase 2: Fusion 预训练（AttentionInjection × 4 + KnowledgeEncoder，FineWeb-Edu）
   phase2_lr: 3.0e-4
   phase2_batch_size: 32
-  phase2_max_epochs: 5
+  phase2_max_epochs: 10
   phase2_warmup_steps: 100
 
   # Phase 3: 下游 SFT（MedQA，早停）

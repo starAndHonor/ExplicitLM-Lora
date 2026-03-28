@@ -18,6 +18,9 @@
 #   GPU_IDS         CUDA_VISIBLE_DEVICES（默认 6,7）
 #   FROM_PHASE2     Phase 2 最优 checkpoint 目录（默认 checkpoints/phase2_best）
 #   CONFIG          配置文件路径（默认 config/default.yaml）
+#   ENC_MODE        知识编码模式（默认 trainable，可选 qwen3）
+#   FROM_TAG        Phase 2 实验标签，用于自动生成 Phase 3 输出目录
+#                   （默认取 FROM_PHASE2 目录名）
 
 set -euo pipefail
 
@@ -32,6 +35,10 @@ PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 FROM_PHASE2="${FROM_PHASE2:-${PROJECT_ROOT}/checkpoints/phase2_best}"
 ENV_FILE="${PROJECT_ROOT}/.env"
+ENC_MODE="${ENC_MODE:-trainable}"
+FROM_TAG="${FROM_TAG:-$(basename "${FROM_PHASE2}")}"
+CKP_NAME="p3_from_${FROM_TAG}"
+CHECKPOINT_PATH="checkpoints/${CKP_NAME}"
 
 # ── 项目环境变量（如 SwanLab API Key） ──
 if [ -f "${ENV_FILE}" ]; then
@@ -48,6 +55,8 @@ echo "[Phase3SFT] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, num_processes=${
 echo "[Phase3SFT] Config: ${CONFIG}"
 echo "[Phase3SFT] Phase 2 Checkpoint: ${FROM_PHASE2}"
 echo "[Phase3SFT] Project: ${PROJECT_ROOT}"
+echo "[Phase3SFT] Encoder mode: ${ENC_MODE}"
+echo "[Phase3SFT] Checkpoint name: ${CKP_NAME}"
 
 # ── 检查 Phase 2 Checkpoint ──
 if [ ! -d "${FROM_PHASE2}" ]; then
@@ -98,5 +107,7 @@ conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launc
     "${PROJECT_ROOT}/main.py" \
     --config "${CONFIG}" \
     --device cuda \
-    train --phase 3 --from-phase2 "${FROM_PHASE2}" \
-    "$@"
+    --override model.knowledge_encoder_mode="${ENC_MODE}" \
+    --override paths.checkpoint_dir="${CHECKPOINT_PATH}" \
+    "$@" \
+    train --phase 3 --from-phase2 "${FROM_PHASE2}"

@@ -18,7 +18,9 @@ tests/unit/test_injection_modules.py — 注入模块单元测试
 
 from __future__ import annotations
 
+import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -266,6 +268,73 @@ class TestAttentionInjection:
         with torch.no_grad():
             out = attn_inj(hidden, knowledge, mask_partial)
         assert torch.isfinite(out).all(), "输出存在 NaN/Inf"
+
+    def test_matches_reference_after_weight_mapping(self) -> None:
+        """
+        将 ref AttentionInjection 的参数映射到当前实现后，两者输出应完全一致。
+
+        验证点：
+            - 输出 shape 一致
+            - 输出 dtype 一致
+            - 数值逐元素一致
+        """
+        logger_mod = types.ModuleType("utils.logger_system")
+        logger_mod.log_msg = lambda *args, **kwargs: None
+        sys.modules.setdefault("utils.logger_system", logger_mod)
+
+        ref_path = (
+            PROJECT_ROOT
+            / "Reference"
+            / "Explicit-Lora-fusion"
+            / "models"
+            / "injection_modules.py"
+        )
+        spec = importlib.util.spec_from_file_location("ref_injection_modules", ref_path)
+        assert spec is not None and spec.loader is not None
+        ref_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ref_mod)
+        RefAttentionInjection = ref_mod.AttentionInjection
+
+        torch.manual_seed(SEED)
+        ref = RefAttentionInjection(hidden_dim=D, num_heads=NUM_HEADS, dropout=0.0).eval()
+        cur = AttentionInjection(hidden_dim=D, num_heads=NUM_HEADS).eval()
+
+        with torch.no_grad():
+            in_proj_w = ref.cross_attn.in_proj_weight
+            in_proj_b = ref.cross_attn.in_proj_bias
+            cur.W_q.weight.copy_(in_proj_w[:D])
+            cur.W_k.weight.copy_(in_proj_w[D : 2 * D])
+            cur.W_v.weight.copy_(in_proj_w[2 * D :])
+            cur.W_q.bias.copy_(in_proj_b[:D])
+            cur.W_k.bias.copy_(in_proj_b[D : 2 * D])
+            cur.W_v.bias.copy_(in_proj_b[2 * D :])
+            cur.out_proj.weight.copy_(ref.cross_attn.out_proj.weight)
+            cur.out_proj.bias.copy_(ref.cross_attn.out_proj.bias)
+            cur.pre_norm.gamma.copy_(ref.norm.gamma)
+            cur.null_k.copy_(ref.null_k)
+            cur.null_v.copy_(ref.null_v)
+
+        hidden = torch.randn(B, L, D)
+        knowledge = torch.randn(B, 5, D)
+        cur_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 0, 1, 1, 0]], dtype=torch.long)
+        ref_mask = cur_mask == 0
+
+        with torch.no_grad():
+            ref_out = ref(hidden, knowledge, ref_mask)
+            cur_out = cur(hidden, knowledge, cur_mask)
+
+        diff = (ref_out - cur_out).abs()
+
+        assert ref_out.shape == cur_out.shape, (
+            f"输出 shape 应一致，当前={tuple(cur_out.shape)}，ref={tuple(ref_out.shape)}"
+        )
+        assert ref_out.dtype == cur_out.dtype, (
+            f"输出 dtype 应一致，当前={cur_out.dtype}，ref={ref_out.dtype}"
+        )
+        assert torch.equal(ref_out, cur_out), (
+            "参数映射后当前 AttentionInjection 应与 ref 完全一致，"
+            f"但 max_abs={diff.max().item()} mean_abs={diff.mean().item()}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
