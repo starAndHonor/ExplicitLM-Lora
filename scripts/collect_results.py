@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = PROJECT_ROOT / "results"
 DEFAULT_OUTPUT = RESULTS_DIR / "results_summary.md"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import load_config
 
 
 @dataclass
@@ -40,6 +44,12 @@ def _pct(value: Any) -> str:
     return "-"
 
 
+def _signed_pct(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value * 100:+.2f}%"
+    return "-"
+
+
 def _num(value: Any, digits: int = 2) -> str:
     if isinstance(value, (int, float)):
         return f"{value:.{digits}f}"
@@ -60,6 +70,34 @@ def _scan_results() -> list[Path]:
     return sorted(path for path in RESULTS_DIR.rglob("*.json") if _is_result_json(path))
 
 
+def _model_overview() -> list[str]:
+    cfg = load_config(PROJECT_ROOT / "config" / "default.yaml")
+    model = cfg.model
+    router = cfg.router
+    train = cfg.train
+    data = cfg.data
+    return [
+        "## Model Config",
+        "",
+        "- `base_model`: `{}`".format(model.base_model),
+        "- `hidden_dim`: `{}`".format(model.hidden_dim),
+        "- `num_layers`: `{}`".format(model.num_layers),
+        "- `injection_method`: `{}`".format(model.injection_method),
+        "- `injection_layers`: `{}`".format(model.injection_layers),
+        "- `encoder_depth`: `{}`".format(model.encoder_depth),
+        "- `knowledge_encoder_mode`: `{}`".format(model.knowledge_encoder_mode),
+        "- `fusion_length`: `{}`".format(model.fusion_length),
+        "- `anchor_length`: `{}`".format(model.anchor_length),
+        "- `router.num_candidates`: `{}`".format(router.num_candidates),
+        "- `router.temperature`: `{}`".format(router.temperature),
+        "- `train.phase2_max_epochs`: `{}`".format(train.phase2_max_epochs),
+        "- `train.phase3_max_epochs`: `{}`".format(train.phase3_max_epochs),
+        "- `data.phase2_n_samples_per_epoch`: `{}`".format(data.phase2_n_samples_per_epoch),
+        "- `data.phase3_max_seq_length`: `{}`".format(data.phase3_max_seq_length),
+        "",
+    ]
+
+
 def _table(headers: list[str], rows: Iterable[list[str]]) -> list[str]:
     rows = list(rows)
     if not rows:
@@ -71,6 +109,35 @@ def _table(headers: list[str], rows: Iterable[list[str]]) -> list[str]:
     for row in rows:
         out.append("| " + " | ".join(row) + " |")
     return out
+
+
+def _config_summary(data: dict[str, Any]) -> list[str]:
+    items: list[tuple[str, str]] = []
+    field_map = [
+        ("weights", "Weights"),
+        ("phase1_weights", "Phase1 Weights"),
+        ("phase2_weights", "Phase2 Weights"),
+        ("device", "Device"),
+        ("num_gpus", "Num GPUs"),
+        ("max_samples", "Max Samples"),
+        ("n_warmup", "Warmup"),
+        ("n_measure", "Measure"),
+        ("elapsed_sec", "Elapsed Sec"),
+    ]
+    for key, label in field_map:
+        value = data.get(key)
+        if value is None:
+            continue
+        if key.endswith("weights") or key == "weights":
+            rendered = _ckpt_label(value)
+        elif key == "elapsed_sec":
+            rendered = _num(value, 2)
+        else:
+            rendered = str(value)
+        items.append((label, rendered))
+    if not items:
+        return []
+    return ["**Config**", ""] + [f"- `{label}`: `{value}`" for label, value in items] + [""]
 
 
 def _summarize_e1(path: Path, data: dict[str, Any]) -> Section:
@@ -85,59 +152,142 @@ def _summarize_e1(path: Path, data: dict[str, Any]) -> Section:
     ]]
     return Section(
         "E1",
-        _table(
+        _config_summary(data)
+        + _table(
             ["File", "Weights", "Correct", "Counterfactual", "No Knowledge", "KS", "Total"],
             rows,
         ),
     )
 
 
+def _format_ratio(acc: Any, correct: Any, total: Any) -> str:
+    if isinstance(acc, (int, float)) and isinstance(correct, int) and isinstance(total, int):
+        return f"{acc * 100:.2f}% ({correct}/{total})"
+    return "-"
+
+
+def _summarize_e1_group(paths: list[Path]) -> Section | None:
+    grouped: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        weight = _ckpt_label(data.get("weights"))
+        grouped[weight] = (path, data)
+    if not grouped:
+        return None
+
+    ordered_items = sorted(grouped.items(), key=lambda item: item[0])
+    if len(ordered_items) == 2:
+        headers = ["指标", "Phase 1 权重", "Phase 2 权重"]
+    else:
+        headers = ["指标"] + [weight for weight, _ in ordered_items]
+    totals = [entry[1].get("total", "-") for _, entry in ordered_items]
+    devices = [str(entry[1].get("device", "-")) for _, entry in ordered_items]
+    files = [_rel(entry[0]) for _, entry in ordered_items]
+
+    config_lines = [
+        "**Config**",
+        "",
+        f"- `Files`: `{files}`",
+        f"- `Devices`: `{devices}`",
+        f"- `Totals`: `{totals}`",
+    ]
+    if len(ordered_items) == 2:
+        config_lines.extend([
+            f"- `Phase 1 权重`: `{ordered_items[0][0]}`",
+            f"- `Phase 2 权重`: `{ordered_items[1][0]}`",
+        ])
+    config_lines.append("")
+
+    rows = [
+        ["acc_correct（正确知识）"]
+        + [
+            _format_ratio(data.get("acc_correct"), data.get("correct_correct"), data.get("total"))
+            for _, (_, data) in ordered_items
+        ],
+        ["acc_counterfactual（反事实知识）"]
+        + [
+            _format_ratio(
+                data.get("acc_counterfactual"),
+                data.get("correct_counterfactual"),
+                data.get("total"),
+            )
+            for _, (_, data) in ordered_items
+        ],
+        ["acc_no_knowledge（全 pad）"]
+        + [
+            _format_ratio(
+                data.get("acc_no_knowledge"),
+                data.get("correct_no_knowledge"),
+                data.get("total"),
+            )
+            for _, (_, data) in ordered_items
+        ],
+        ["KS"]
+        + [
+            ("+" if isinstance(data.get("knowledge_sensitivity"), (int, float)) and data.get("knowledge_sensitivity") >= 0 else "")
+            + _pct(data.get("knowledge_sensitivity"))
+            for _, (_, data) in ordered_items
+        ],
+    ]
+
+    lines = config_lines + _table(headers, rows)
+    return Section("E1", lines)
+
+
 def _summarize_e2(path: Path, data: dict[str, Any]) -> Section:
     rows: list[list[str]] = []
     for ds in ("medqa", "arc", "mmlu"):
         ds_data = data.get(ds, {})
+        total = ds_data.get("baseline", {}).get("total", "-")
+        if ds == "medqa":
+            ds_label = f"MedQA（{total:,} 题）" if isinstance(total, int) else "MedQA"
+        elif ds == "arc":
+            ds_label = f"ARC-Challenge（{total:,} 题）" if isinstance(total, int) else "ARC-Challenge"
+        else:
+            ds_label = f"MMLU（{total:,} 题）" if isinstance(total, int) else "MMLU"
         rows.append([
-            _rel(path),
-            ds.upper(),
-            _ckpt_label(data.get("weights")),
+            ds_label,
             _pct(ds_data.get("baseline", {}).get("acc")),
             _pct(ds_data.get("fusion_knowledge", {}).get("acc")),
             _pct(ds_data.get("fusion_empty", {}).get("acc")),
-            _pct(ds_data.get("delta_acc")),
-            _pct(ds_data.get("delta_acc_empty")),
+            ("+" if isinstance(ds_data.get("delta_acc"), (int, float)) and ds_data.get("delta_acc") >= 0 else "") + _pct(ds_data.get("delta_acc")),
         ])
     return Section(
         "E2",
-        _table(
-            ["File", "Dataset", "Weights", "Baseline", "Fusion+K", "Fusion+Empty", "Δacc", "Δempty"],
+        _config_summary(data)
+        + _table(
+            ["数据集", "Baseline", "Fusion+知识", "Fusion+空知识", "Δacc"],
             rows,
         ),
     )
 
 
 def _summarize_e3(path: Path, data: dict[str, Any]) -> Section:
-    rows: list[list[str]] = []
-    for ds in ("medqa", "arc", "mmlu"):
-        ds_data = data.get(ds, {})
-        summary = data.get("summary", {}).get(ds, {})
-        rows.append([
-            _rel(path),
-            ds.upper(),
-            _ckpt_label(data.get("phase1_weights")),
-            _ckpt_label(data.get("phase2_weights")),
-            _pct(ds_data.get("G0_baseline", {}).get("acc")),
-            _pct(ds_data.get("G1_rag_compressed", {}).get("acc")),
-            _pct(ds_data.get("G2_fusion_phase1", {}).get("acc")),
-            _pct(ds_data.get("G3_fusion_phase2", {}).get("acc")),
-            _pct(ds_data.get("G4_rag_original", {}).get("acc")),
-            _pct(summary.get("G3_vs_G1")),
-        ])
+    medqa = data.get("medqa", {})
+    arc = data.get("arc", {})
+    mmlu = data.get("mmlu", {})
+    rows_main = [
+        ["G0 Baseline", _pct(medqa.get("G0_baseline", {}).get("acc")), _pct(arc.get("G0_baseline", {}).get("acc")), _pct(mmlu.get("G0_baseline", {}).get("acc"))],
+        ["G1 RAG-compressed", _pct(medqa.get("G1_rag_compressed", {}).get("acc")), _pct(arc.get("G1_rag_compressed", {}).get("acc")), _pct(mmlu.get("G1_rag_compressed", {}).get("acc"))],
+        ["G2 Fusion-Phase1", _pct(medqa.get("G2_fusion_phase1", {}).get("acc")), _pct(arc.get("G2_fusion_phase1", {}).get("acc")), _pct(mmlu.get("G2_fusion_phase1", {}).get("acc"))],
+        ["G3 Fusion-Phase2", _pct(medqa.get("G3_fusion_phase2", {}).get("acc")), _pct(arc.get("G3_fusion_phase2", {}).get("acc")), _pct(mmlu.get("G3_fusion_phase2", {}).get("acc"))],
+        ["G4 RAG-original", _pct(medqa.get("G4_rag_original", {}).get("acc")), _pct(arc.get("G4_rag_original", {}).get("acc")), _pct(mmlu.get("G4_rag_original", {}).get("acc"))],
+    ]
+    summary = data.get("summary", {})
+    rows_eff = [
+        ["MedQA", _pct(summary.get("medqa", {}).get("efficiency_G2")), _pct(summary.get("medqa", {}).get("efficiency_G3"))],
+        ["ARC", _pct(summary.get("arc", {}).get("efficiency_G2")), _pct(summary.get("arc", {}).get("efficiency_G3"))],
+        ["MMLU", _pct(summary.get("mmlu", {}).get("efficiency_G2")), _pct(summary.get("mmlu", {}).get("efficiency_G3"))],
+    ]
     return Section(
         "E3",
-        _table(
-            ["File", "Dataset", "Phase1", "Phase2", "G0", "G1", "G2", "G3", "G4", "G3-G1"],
-            rows,
-        ),
+        _config_summary(data)
+        + _table(["组别", "MedQA", "ARC", "MMLU"], rows_main)
+        + ["", "*Efficiency*", ""]
+        + _table(["数据集", "G2 效率", "G3 效率"], rows_eff),
     )
 
 
@@ -149,89 +299,213 @@ def _summarize_e4(path: Path, data: dict[str, Any]) -> Section:
         sft_effect = ds_data.get("sft_effect")
         if sft_effect is None and ds_data.get("sft_cost") is not None:
             sft_effect = -ds_data.get("sft_cost")
+        if ds == "medqa":
+            ds_label = "MedQA"
+        elif ds == "arc":
+            ds_label = "ARC"
+        else:
+            ds_label = "MMLU"
         rows.append([
-            _rel(path),
-            ds.upper(),
-            _ckpt_label(data.get("phase1_weights")),
-            _ckpt_label(data.get("phase2_weights")),
+            ds_label,
             _pct(ds_data.get("baseline_acc")),
             _pct(ds_data.get("phase1_acc")),
             _pct(ds_data.get("phase2_acc")),
-            _pct(ds_data.get("phase1_delta")),
-            _pct(ds_data.get("phase2_delta")),
-            _pct(sft_effect),
+            ("+" if isinstance(ds_data.get("phase1_delta"), (int, float)) and ds_data.get("phase1_delta") >= 0 else "") + _pct(ds_data.get("phase1_delta")),
+            ("+" if isinstance(ds_data.get("phase2_delta"), (int, float)) and ds_data.get("phase2_delta") >= 0 else "") + _pct(ds_data.get("phase2_delta")),
+            ("+" if isinstance(sft_effect, (int, float)) and sft_effect >= 0 else "") + _pct(sft_effect),
         ])
     return Section(
         "E4",
-        _table(
-            ["File", "Dataset", "Phase1", "Phase2", "Baseline", "Phase1 Acc", "Phase2 Acc", "ΔP1", "ΔP2", "SFT Effect"],
+        _config_summary(data)
+        + _table(
+            ["数据集", "Baseline", "Phase 1", "Phase 2", "Phase1 Δ", "Phase2 Δ", "SFT 效果"],
             rows,
         ),
     )
 
 
 def _summarize_e5(path: Path, data: dict[str, Any]) -> Section:
-    rows: list[list[str]] = []
     e5a = data.get("e5a", {})
     e5b = data.get("e5b", {})
+    dataset_titles = {
+        "medqa": "MedQA",
+        "arc": "ARC",
+        "mmlu": "MMLU",
+    }
+    token_budgets = (32, 64, 128, 256)
+    lines = _config_summary(data)
+    lines.append("**E5-A：知识 Token 预算分析**")
+    lines.append("")
     for ds in ("medqa", "arc", "mmlu"):
         a = e5a.get(ds, {})
-        b = e5b.get(ds, {})
-        rows.append([
-            _rel(path),
-            ds.upper(),
-            _ckpt_label(data.get("phase1_weights")),
-            _ckpt_label(data.get("phase2_weights")),
-            _pct(a.get("baseline", {}).get("acc")),
-            _pct(a.get("rag_k64", {}).get("acc")),
-            _pct(a.get("fusion_p2_k64", {}).get("acc")),
-            _pct(a.get("rag_k256", {}).get("acc")),
-            _pct(b.get("oracle_p2", {}).get("acc")),
-            _pct(b.get("shuffled_p2", {}).get("acc")),
-            _pct(b.get("empty_p2", {}).get("acc")),
-        ])
-    return Section(
-        "E5",
+        rows: list[list[str]] = []
+        for k in token_budgets:
+            rag_acc = a.get(f"rag_k{k}", {}).get("acc")
+            fusion_acc = a.get(f"fusion_p2_k{k}", {}).get("acc")
+            rows.append([
+                str(k),
+                _pct(a.get("baseline", {}).get("acc")),
+                _pct(fusion_acc),
+                _pct(rag_acc),
+                _signed_pct(
+                    fusion_acc - rag_acc
+                    if isinstance(fusion_acc, (int, float)) and isinstance(rag_acc, (int, float))
+                    else None
+                ),
+            ])
+        lines.append(f"**{dataset_titles[ds]}**")
+        lines.append("")
+        lines.extend(
+            _table(
+                ["Token", "Baseline", "Fusion-P2", "RAG", "Δ(Fusion-RAG)"],
+                rows,
+            )
+        )
+        lines.append("")
+
+    lines.append("**E5-B：知识相关性分析（k=64）**")
+    lines.append("")
+    lines.extend(
         _table(
-            ["File", "Dataset", "Phase1", "Phase2", "Baseline", "RAG@64", "FusionP2@64", "RAG@256", "OracleP2", "ShuffledP2", "EmptyP2"],
-            rows,
-        ),
+            ["条件", "P1 MedQA", "P2 MedQA", "P1 ARC", "P2 ARC", "P1 MMLU", "P2 MMLU"],
+            [
+                [
+                    "Oracle",
+                    _pct(e5b.get("medqa", {}).get("oracle_p1", {}).get("acc")),
+                    _pct(e5b.get("medqa", {}).get("oracle_p2", {}).get("acc")),
+                    _pct(e5b.get("arc", {}).get("oracle_p1", {}).get("acc")),
+                    _pct(e5b.get("arc", {}).get("oracle_p2", {}).get("acc")),
+                    _pct(e5b.get("mmlu", {}).get("oracle_p1", {}).get("acc")),
+                    _pct(e5b.get("mmlu", {}).get("oracle_p2", {}).get("acc")),
+                ],
+                [
+                    "Shuffled",
+                    _pct(e5b.get("medqa", {}).get("shuffled_p1", {}).get("acc")),
+                    _pct(e5b.get("medqa", {}).get("shuffled_p2", {}).get("acc")),
+                    _pct(e5b.get("arc", {}).get("shuffled_p1", {}).get("acc")),
+                    _pct(e5b.get("arc", {}).get("shuffled_p2", {}).get("acc")),
+                    _pct(e5b.get("mmlu", {}).get("shuffled_p1", {}).get("acc")),
+                    _pct(e5b.get("mmlu", {}).get("shuffled_p2", {}).get("acc")),
+                ],
+                [
+                    "Empty",
+                    _pct(e5b.get("medqa", {}).get("empty_p1", {}).get("acc")),
+                    _pct(e5b.get("medqa", {}).get("empty_p2", {}).get("acc")),
+                    _pct(e5b.get("arc", {}).get("empty_p1", {}).get("acc")),
+                    _pct(e5b.get("arc", {}).get("empty_p2", {}).get("acc")),
+                    _pct(e5b.get("mmlu", {}).get("empty_p1", {}).get("acc")),
+                    _pct(e5b.get("mmlu", {}).get("empty_p2", {}).get("acc")),
+                ],
+            ],
+        )
     )
+    return Section("E5", lines)
 
 
 def _summarize_e6(path: Path, data: dict[str, Any]) -> Section:
     benches = data.get("benchmarks", {})
     acc = data.get("accuracy_data", {}).get("medqa", {})
     rows = []
+    label_map = {
+        "baseline": "Baseline",
+        "rag_compressed": "RAG-compressed@64",
+        "fusion": "Fusion-Phase2@64",
+        "rag_original": "RAG-original@~256",
+    }
+    context_map = {
+        "baseline": "0 tokens",
+        "rag_compressed": "~64 tokens",
+        "fusion": "0 tokens",
+        "rag_original": "~256 tokens",
+    }
     for key in ("baseline", "rag_compressed", "fusion", "rag_original"):
         b = benches.get(key, {})
         rows.append([
-            _rel(path),
-            b.get("label", key),
-            _ckpt_label(data.get("phase2_weights")),
+            label_map.get(key, b.get("label", key)),
             _num(b.get("latency_ms")),
             _num(b.get("throughput")),
             _num(b.get("peak_memory_mb"), 1),
             _num(b.get("avg_input_len"), 1),
-            str(b.get("context_tokens", "-")),
+            context_map.get(key, str(b.get("context_tokens", "-"))),
         ])
-    lines = _table(
-        ["File", "Method", "Phase2", "Latency(ms)", "Throughput", "Memory(MB)", "Avg Input", "Ctx Tokens"],
+    lines = _config_summary(data) + _table(
+        ["方法", "延迟 (ms/样本)", "吞吐 (样本/s)", "显存 (MB)", "平均输入长度", "上下文占用"],
         rows,
     )
-    if acc:
+    rag_abs_acc = acc.get("rag_original", acc.get("rag_k256"))
+    fusion_abs_acc = acc.get("fusion_phase2", acc.get("fusion_p2_k64"))
+    rag_acc64 = acc.get("rag_k64")
+    fusion_acc64 = acc.get("fusion_p2_k64")
+    rag_b = benches.get("rag_original")
+    fusion_b = benches.get("fusion")
+    if (
+        isinstance(rag_abs_acc, (int, float))
+        and isinstance(fusion_abs_acc, (int, float))
+        and isinstance(rag_b, dict)
+        and isinstance(fusion_b, dict)
+    ):
+        latency_delta = None
+        if isinstance(rag_b.get("latency_ms"), (int, float)) and rag_b.get("latency_ms"):
+            latency_delta = (fusion_b.get("latency_ms") - rag_b.get("latency_ms")) / rag_b.get("latency_ms")
+        memory_delta = None
+        if isinstance(rag_b.get("peak_memory_mb"), (int, float)) and rag_b.get("peak_memory_mb"):
+            memory_delta = (fusion_b.get("peak_memory_mb") - rag_b.get("peak_memory_mb")) / rag_b.get("peak_memory_mb")
         lines.extend([
             "",
+            "**修正后的六维对比汇总表（E3 准确率 + E6 效率）**",
+            "",
             * _table(
-                ["MedQA Ref", "Baseline", "RAG@64", "FusionP2@64", "RAG-original", "Fusion Phase2"],
-                [[
-                    _rel(path),
-                    _pct(acc.get("baseline")),
-                    _pct(acc.get("rag_k64")),
-                    _pct(acc.get("fusion_p2_k64")),
-                    _pct(acc.get("rag_original")),
-                    _pct(acc.get("fusion_phase2")),
-                ]],
+                ["维度", "RAG-original (G4)", "Fusion Phase 2 (G3)", "胜者"],
+                [
+                    [
+                        "绝对准确率",
+                        f"{_pct(rag_abs_acc)} (MedQA)",
+                        f"{_pct(fusion_abs_acc)} (MedQA)",
+                        "RAG" if rag_abs_acc > fusion_abs_acc else "Fusion",
+                    ],
+                    [
+                        "同 token 准确率(k=64)",
+                        _pct(rag_acc64),
+                        (
+                            f"{_pct(fusion_acc64)} ({_signed_pct(fusion_acc64 - rag_acc64)})"
+                            if isinstance(rag_acc64, (int, float)) and isinstance(fusion_acc64, (int, float))
+                            else _pct(fusion_acc64)
+                        ),
+                        "Fusion" if isinstance(rag_acc64, (int, float)) and isinstance(fusion_acc64, (int, float)) and fusion_acc64 > rag_acc64 else "RAG",
+                    ],
+                    [
+                        "推理延迟",
+                        f"{_num(rag_b.get('latency_ms'))} ms",
+                        (
+                            f"{_num(fusion_b.get('latency_ms'))} ms ({_signed_pct(latency_delta)})"
+                            if isinstance(latency_delta, (int, float))
+                            else f"{_num(fusion_b.get('latency_ms'))} ms"
+                        ),
+                        "Fusion" if isinstance(fusion_b.get("latency_ms"), (int, float)) and isinstance(rag_b.get("latency_ms"), (int, float)) and fusion_b.get("latency_ms") < rag_b.get("latency_ms") else "RAG",
+                    ],
+                    [
+                        "峰值显存",
+                        f"{_num(rag_b.get('peak_memory_mb'), 1)} MB",
+                        (
+                            f"{_num(fusion_b.get('peak_memory_mb'), 1)} MB ({_signed_pct(memory_delta)})"
+                            if isinstance(memory_delta, (int, float))
+                            else f"{_num(fusion_b.get('peak_memory_mb'), 1)} MB"
+                        ),
+                        "Fusion" if isinstance(fusion_b.get("peak_memory_mb"), (int, float)) and isinstance(rag_b.get("peak_memory_mb"), (int, float)) and fusion_b.get("peak_memory_mb") < rag_b.get("peak_memory_mb") else "RAG",
+                    ],
+                    [
+                        "上下文窗口侵占",
+                        "~256 token",
+                        "0 token",
+                        "Fusion",
+                    ],
+                    [
+                        "知识可预编码缓存",
+                        "否（每次重处理）",
+                        "是（编码一次复用）",
+                        "Fusion",
+                    ],
+                ],
             ),
         ])
     return Section("E6", lines)
@@ -270,9 +544,18 @@ def _make_section(path: Path) -> Section | None:
 
 def build_summary() -> str:
     sections_by_exp: dict[str, list[Section]] = {f"E{i}": [] for i in range(1, 7)}
-    for path in _scan_results():
+    all_paths = _scan_results()
+
+    e1_paths = [path for path in all_paths if path.parent.name.lower() == "e1" or path.name.lower().startswith("e1_")]
+    e1_section = _summarize_e1_group(e1_paths)
+    if e1_section is not None:
+        sections_by_exp["E1"].append(e1_section)
+
+    for path in all_paths:
         section = _make_section(path)
         if section is not None:
+            if section.title == "E1":
+                continue
             sections_by_exp[section.title].append(section)
 
     lines = [
@@ -282,6 +565,7 @@ def build_summary() -> str:
         "",
         "This file is auto-generated from `results/`. Keep `result.md` for hand-written conclusions.",
         "",
+        *_model_overview(),
     ]
 
     for exp in (f"E{i}" for i in range(1, 7)):
