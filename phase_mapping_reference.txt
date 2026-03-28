@@ -1,0 +1,75 @@
+Fusion Experiment Stage Mapping
+===============================
+
+This file maps the old stage names used in fusion_experiment_plan.md to the
+current repository checkpoints and training scripts.
+
+1. High-level conclusion
+------------------------
+
+The old document stages do not match the current repository checkpoint names
+one-to-one.
+
+- Old "Phase 1" in the plan is closest to current `checkpoints/phase2_best`
+- Old "Phase 2" in the plan is closest to current `checkpoints/phase3_best`
+- Current `checkpoints/phase1_best` is a Router checkpoint, not a Fusion E2/E3
+  checkpoint
+
+
+2. Mapping table
+----------------
+
+| Old plan stage | Old plan meaning | Current closest stage | Current checkpoint | Notes |
+| --- | --- | --- | --- | --- |
+| Old Phase 1 | Fusion general pretraining, evaluate bare cross-domain fusion ability without domain SFT | Current Phase 2 Fusion | checkpoints/phase2_best | This is the right semantic match for old E2 Phase 1 style evaluation |
+| Old Phase 2 | MedQA SFT after fusion pretraining, used in E1/E3/E4 strong results | Current Phase 3 SFT | checkpoints/phase3_best | This is the right semantic match for old E3/E4 Phase 2 style evaluation |
+| Old Phase 3 | Not a stable 1:1 stage in the old E1/E2/E3 core comparisons shown in the plan | No strict current equivalent | N/A | Usually not the checkpoint you want when reproducing the old plan tables |
+
+
+3. Current repository checkpoint meanings
+-----------------------------------------
+
+| Current checkpoint | Current meaning | Matches old plan stage? |
+| --- | --- | --- |
+| checkpoints/phase1_best | Router training output | No |
+| checkpoints/phase2_best | Fusion pretraining output | Approximately old Phase 1 |
+| checkpoints/phase3_best | MedQA SFT output | Approximately old Phase 2 |
+
+
+4. Evidence
+-----------
+
+- `checkpoints/phase1_best/meta.txt` contains Router-style metrics such as
+  `recall@1`, `recall@4`, `recall@16`, `final_acc`, `cond_fine_acc`
+- `scripts/run_phase2_fusion.sh` explicitly labels current Phase 2 as
+  "Phase 2 Fusion pretraining"
+- `scripts/run_phase3_sft.sh` explicitly labels current Phase 3 as
+  "Phase 3 MedQA SFT"
+- In `fusion_experiment_plan.md`, old E2 says it uses "Phase 1 weights" and
+  explicitly says "without domain SFT"
+- In `fusion_experiment_plan.md`, old E4 describes old Phase 2 as MedQA SFT
+
+
+5. Practical usage
+------------------
+
+To reproduce old-plan E2 semantics:
+- Use `checkpoints/phase2_best`
+- Do not use `checkpoints/phase3_best`
+
+To reproduce old-plan E3/E4 semantics:
+- Use `checkpoints/phase2_best` as old Phase 1
+- Use `checkpoints/phase3_best` as old Phase 2
+
+
+6. Example command mapping
+--------------------------
+
+Old-plan-style E3 with current checkpoints:
+
+CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e3-ref/run_e3_ref.py \
+  --config config/default.yaml \
+  --phase1-weights checkpoints/phase2_best \
+  --phase2-weights checkpoints/phase3_best \
+  --tag phase23_ref_gpu23

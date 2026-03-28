@@ -10,12 +10,17 @@
 #       NUM_GPUS=2 GPU_IDS=3,5 FROM_PHASE2=checkpoints/phase2_best bash scripts/run_phase3_sft.sh
 #   覆盖配置参数：
 #       bash scripts/run_phase3_sft.sh --override train.phase3_max_epochs=1
+#   默认实时输出（不捕获 conda 输出）：
+#       bash scripts/run_phase3_sft.sh
 #
 # 环境变量：
 #   NUM_GPUS        使用 GPU 数量（默认 2）
 #   GPU_IDS         CUDA_VISIBLE_DEVICES（默认 6,7）
 #   FROM_PHASE2     Phase 2 最优 checkpoint 目录（默认 checkpoints/phase2_best）
 #   CONFIG          配置文件路径（默认 config/default.yaml）
+#   ENC_MODE        知识编码模式（默认 trainable，可选 qwen3）
+#   FROM_TAG        Phase 2 实验标签，用于自动生成 Phase 3 输出目录
+#                   （默认取 FROM_PHASE2 目录名）
 
 set -euo pipefail
 
@@ -29,11 +34,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 FROM_PHASE2="${FROM_PHASE2:-${PROJECT_ROOT}/checkpoints/phase2_best}"
+ENV_FILE="${PROJECT_ROOT}/.env"
+ENC_MODE="${ENC_MODE:-trainable}"
+FROM_TAG="${FROM_TAG:-$(basename "${FROM_PHASE2}")}"
+CKP_NAME="p3_from_${FROM_TAG}"
+CHECKPOINT_PATH="checkpoints/${CKP_NAME}"
+
+# ── 项目环境变量（如 SwanLab API Key） ──
+if [ -f "${ENV_FILE}" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+    set +a
+    echo "[Phase3SFT] 已加载项目环境变量: ${ENV_FILE}"
+else
+    echo "[Phase3SFT] 未找到项目 .env，继续使用当前 shell 环境变量"
+fi
 
 echo "[Phase3SFT] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, num_processes=${NUM_GPUS}"
 echo "[Phase3SFT] Config: ${CONFIG}"
 echo "[Phase3SFT] Phase 2 Checkpoint: ${FROM_PHASE2}"
 echo "[Phase3SFT] Project: ${PROJECT_ROOT}"
+echo "[Phase3SFT] Encoder mode: ${ENC_MODE}"
+echo "[Phase3SFT] Checkpoint name: ${CKP_NAME}"
 
 # ── 检查 Phase 2 Checkpoint ──
 if [ ! -d "${FROM_PHASE2}" ]; then
@@ -66,24 +89,25 @@ CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints"
 mkdir -p "${CHECKPOINT_DIR}"
 echo "[Phase3SFT] Checkpoint 目录: ${CHECKPOINT_DIR}"
 
-# ── 激活 Conda 环境 ──
-eval "$(conda shell.bash hook)"
-conda activate ExplicitLLM
-
 # ── 检查依赖 ──
-python -c "import accelerate; import swanlab; import datasets" 2>/dev/null || {
+conda run --no-capture-output -n ExplicitLLM python -c "import accelerate; import swanlab; import datasets" 2>/dev/null || {
     echo "[INFO] 安装缺失依赖..."
-    pip install accelerate swanlab datasets -q
+    conda run --no-capture-output -n ExplicitLLM pip install accelerate swanlab datasets -q
 }
 
 # ── Accelerate 启动 ──
+# 注意：不能直接用 `conda run ... accelerate launch`
+# 否则可能命中 ~/.local/bin/accelerate，落回系统 Python。
+# 这里强制使用 ExplicitLLM 环境中的 `python -m accelerate.commands.launch`。
 echo "[Phase3SFT] 启动训练..."
-accelerate launch \
+conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launch \
     --num_processes "${NUM_GPUS}" \
     --mixed_precision bf16 \
     --main_process_port 29502 \
     "${PROJECT_ROOT}/main.py" \
     --config "${CONFIG}" \
     --device cuda \
-    train --phase 3 --from-phase2 "${FROM_PHASE2}" \
-    "$@"
+    --override model.knowledge_encoder_mode="${ENC_MODE}" \
+    --override paths.checkpoint_dir="${CHECKPOINT_PATH}" \
+    "$@" \
+    train --phase 3 --from-phase2 "${FROM_PHASE2}"

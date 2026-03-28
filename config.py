@@ -37,6 +37,9 @@ class ModelConfig:
         injection_method: 知识注入方式，"attention" | "concat" | "gated"
         injection_layers: 注入模块所在层索引列表
         encoder_depth: 知识编码器使用的 Qwen3 前 N 层
+        knowledge_encoder_mode: 知识编码器模式
+            - "trainable": 当前主线模式，显式 mask + 独立 norm + 可联合训练
+            - "qwen3": 复用 Qwen3 encoder helper 语义，不显式使用知识 mask，不训练 encoder
         fusion_length: Fusion Bank 每条知识的 token 数（LLMLingua 压缩后）
         anchor_length: Anchor Bank 每条知识的 token 数（原文截断）
     """
@@ -47,6 +50,7 @@ class ModelConfig:
     injection_method: str
     injection_layers: List[int]
     encoder_depth: int
+    knowledge_encoder_mode: str
     fusion_length: int
     anchor_length: int
 
