@@ -1,19 +1,61 @@
-# E2 Results
+# E1 / E2 Results
 
 说明：
 - `phase3_best` 是在 `phase2_best` 基础上继续进行 Phase 3 SFT 训练得到的权重。
 - 本文件中的 E2 结果使用的是当前仓库 `models/` 下的完整 Phase 2 Fusion 模型，不是旧 Reference 的只加载 injection_modules 的评测子图。
 
-## `phase2_best`
+## `E1` `p2_qwen3_10ep/phase2_best`
+
+来源：
+- [results/e1/e1_sanity_check_phase2_best.json](/home/undergraduate/zcy/Explicit-Lora/results/e1/e1_sanity_check_phase2_best.json)
+
+| 指标 | 数值 |
+|---|---:|
+| acc_correct | 43.44% (553/1273) |
+| acc_counterfactual | 29.07% (370/1273) |
+| acc_no_knowledge | 31.97% (407/1273) |
+| knowledge_sensitivity (KS) | +14.38% |
+
+补充信息：
+
+| 项目 | 值 |
+|---|---|
+| 权重 | `checkpoints/p2_qwen3_10ep/phase2_best` |
+| 设备 | `cuda` |
+| max_samples | -1 |
+| total | 1273 |
+
+## `E1` `p3_from_p2_qwen3_10ep/phase3_best`
+
+来源：
+- [results/e1/e1_sanity_check_p3_from_p2_qwen3_10ep_phase3_best.json](/home/undergraduate/zcy/Explicit-Lora/results/e1/e1_sanity_check_p3_from_p2_qwen3_10ep_phase3_best.json)
+
+| 指标 | 数值 |
+|---|---:|
+| acc_correct | 70.07% (892/1273) |
+| acc_counterfactual | 13.67% (174/1273) |
+| acc_no_knowledge | 31.58% (402/1273) |
+| knowledge_sensitivity (KS) | +56.40% |
+
+补充信息：
+
+| 项目 | 值 |
+|---|---|
+| 权重 | `checkpoints/p3_from_p2_qwen3_10ep/phase3_best` |
+| 设备 | `cuda` |
+| max_samples | -1 |
+| total | 1273 |
+
+## `phase2_best`（10轮，有 norm 训练版本）
 
 来源：
 - [results/e2/e2_cross_domain_phase2_best.json](/home/undergraduate/zcy/Explicit-Lora/results/e2/e2_cross_domain_phase2_best.json)
 
 | 数据集 | Baseline | Fusion+知识 | Fusion+空知识 | Δacc | Δacc_empty |
 |---|---:|---:|---:|---:|---:|
-| MedQA（1273） | 32.91% (419/1273) | 34.56% (440/1273) | 33.94% (432/1273) | +1.65% | +1.02% |
-| ARC-Challenge（1165） | 51.85% (604/1165) | 54.51% (635/1165) | 53.56% (624/1165) | +2.66% | +1.72% |
-| MMLU（14042） | 41.61% (5843/14042) | 41.29% (5798/14042) | 42.91% (6025/14042) | -0.32% | +1.30% |
+| MedQA（1273） | 32.91% (419/1273) | 42.58% (542/1273) | 33.46% (426/1273) | +9.66% | +0.55% |
+| ARC-Challenge（1165） | 51.85% (604/1165) | 63.18% (736/1165) | 53.05% (618/1165) | +11.33% | +1.20% |
+| MMLU（14042） | 41.61% (5843/14042) | 47.62% (6687/14042) | 42.92% (6027/14042) | +6.01% | +1.31% |
 
 补充信息：
 
@@ -25,7 +67,8 @@
 | max_samples | -1 |
 | knowledge_miss_count | 全部为 0 |
 | ARC skipped | 0 |
-| elapsed_sec | 2214.96s |
+| 备注 | `phase2_best`，10 个 epoch，当前实际行为为带独立 `norm` 训练的版本 |
+| elapsed_sec | 2221.75s |
 
 ## `phase2_epoch4`
 
@@ -49,6 +92,30 @@
 | knowledge_miss_count | 全部为 0 |
 | ARC skipped | 0 |
 | elapsed_sec | 2206.09s |
+
+## `p2_qwen3_10ep/phase2_best`（qwen3 10轮版本）
+
+来源：
+- [results/e2/e2_cross_domain_p2_qwen3_10ep_phase2_best.json](/home/undergraduate/zcy/Explicit-Lora/results/e2/e2_cross_domain_p2_qwen3_10ep_phase2_best.json)
+
+| 数据集 | Baseline | Fusion+知识 | Fusion+空知识 | Δacc | Δacc_empty |
+|---|---:|---:|---:|---:|---:|
+| MedQA（1273） | 32.91% (419/1273) | 40.30% (513/1273) | 31.97% (407/1273) | +7.38% | -0.94% |
+| ARC-Challenge（1165） | 51.85% (604/1165) | 61.20% (713/1165) | 51.85% (604/1165) | +9.36% | +0.00% |
+| MMLU（14042） | 41.61% (5843/14042) | 45.63% (6408/14042) | 41.00% (5757/14042) | +4.02% | -0.61% |
+
+补充信息：
+
+| 项目 | 值 |
+|---|---|
+| 权重 | `checkpoints/p2_qwen3_10ep/phase2_best` |
+| 设备 | `cuda:0` |
+| GPU 数 | 2 |
+| max_samples | -1 |
+| 备注 | `qwen3` 模式，10 个 epoch，复用 Qwen3 encoder 与原始 `norm` |
+| knowledge_miss_count | 全部为 0 |
+| ARC skipped | 0 |
+| elapsed_sec | 2212.92s |
 
 ## `e3_fair_compare`
 
