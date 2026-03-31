@@ -7,20 +7,85 @@
 
 ## 训练
 
-### Phase 2 Fusion
+### 三种方案
 
-默认 `trainable` 模式：
+#### 方案一：`P1-Router -> P2-RouterFusion -> P3-SFT`
+
+含义：
+
+- `Phase1` 先训练 router
+- `Phase2` 使用 `Phase1` 检索出来的知识训练 fusion
+- `Phase3` 继续使用 `Phase1` 检索知识做 SFT
+
+可直接复制执行：
+
+```bash
+cd /tmp/Explicit-Lora-model-dev
+bash scripts/run_scheme1_p1_p2_p3.sh
+```
+
+最终模型示例：
+
+```text
+checkpoints/p3_from_p2_trainable_10ep_router/phase3_best
+```
+
+#### 方案二：`P1-Router -> P3-FusionInference`
+
+含义：
+
+- `Phase1` 只负责检索
+- `Phase3` 使用已有 `phase3_best` 做融合推理
+- 不训练，不做 SFT
+
+当前建议：
+
+- 使用 `Phase1` 权重：`/home/undergraduate/zcy/Explicit-Lora/checkpoints/phase1_best`
+- 使用 `Phase3` 权重：`/home/undergraduate/zcy/Explicit-Lora/checkpoints/phase3_best`
+
+可直接复制执行：
+
+```bash
+cd /tmp/Explicit-Lora-model-dev
+bash scripts/run_scheme2_p1_p3_infer.sh \
+  --question "A 23-year-old pregnant woman at 22 weeks gestation presents with burning upon urination. Which of the following is the best treatment for this patient?" \
+  --option-a "Ampicillin" \
+  --option-b "Ceftriaxone" \
+  --option-c "Doxycycline" \
+  --option-d "Nitrofurantoin"
+```
+
+#### 方案三：`P2-OracleFusion -> P1-Router -> P3-SFT`
+
+含义：
+
+- `Phase2` 先用正确知识（oracle knowledge）训练 fusion
+- `Phase3` 再切换到 `Phase1` 检索知识做 SFT
+- 最终模型学到的是“正确融合能力 + 检索噪声适应能力”
+
+可直接复制执行：
+
+```bash
+cd /tmp/Explicit-Lora-model-dev
+bash scripts/run_scheme3_p2oracle_p1_p3.sh
+```
+
+最终模型示例：
+
+```text
+checkpoints/p3_from_p2_trainable_10ep_oracle/phase3_best
+```
+
+### 基础单阶段命令
+
+#### 单独训练 `Phase2 Fusion`
+
+`trainable` 模式：
 
 ```bash
 ENC_MODE=trainable EPOCHS=10 TAG=norm \
 NUM_GPUS=2 GPU_IDS=2,3 \
 bash scripts/run_phase2_fusion.sh
-```
-
-输出目录示例：
-
-```text
-checkpoints/p2_trainable_10ep_norm
 ```
 
 `qwen3` 模式：
@@ -31,15 +96,9 @@ NUM_GPUS=2 GPU_IDS=2,3 \
 bash scripts/run_phase2_fusion.sh
 ```
 
-输出目录示例：
+#### 单独训练 `Phase3 SFT`
 
-```text
-checkpoints/p2_qwen3_10ep
-```
-
-### Phase 3 SFT
-
-从 `trainable` 的 Phase 2 接着训练：
+从 `trainable` 的 `Phase2` 接着训练：
 
 ```bash
 ENC_MODE=trainable \
@@ -49,13 +108,7 @@ NUM_GPUS=2 GPU_IDS=2,3 \
 bash scripts/run_phase3_sft.sh --override data.num_workers=0
 ```
 
-输出目录示例：
-
-```text
-checkpoints/p3_from_p2_trainable_10ep_norm
-```
-
-从 `qwen3` 的 Phase 2 接着训练：
+从 `qwen3` 的 `Phase2` 接着训练：
 
 ```bash
 ENC_MODE=qwen3 \
@@ -63,12 +116,6 @@ FROM_PHASE2=checkpoints/p2_qwen3_10ep/phase2_best \
 FROM_TAG=p2_qwen3_10ep \
 NUM_GPUS=2 GPU_IDS=2,3 \
 bash scripts/run_phase3_sft.sh --override data.num_workers=0
-```
-
-输出目录示例：
-
-```text
-checkpoints/p3_from_p2_qwen3_10ep
 ```
 
 ## 实验评测

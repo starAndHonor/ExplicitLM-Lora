@@ -39,6 +39,7 @@ from config import Config
 from models.injection_modules import AttentionInjection
 from models.modified_model import ModifiedQwen
 from models.qwen_wrapper import KnowledgeEncoder, load_base_model
+from training.phase1_retriever import Phase1Retriever
 
 # Phase 1 工具函数复用（数据采样 + tokenize）
 from training.phase1_router import ParquetEpochSampler, tokenize_parquet_batch
@@ -326,7 +327,12 @@ def _build_modified_qwen(cfg: Config, device: str) -> Tuple[ModifiedQwen, AutoTo
 # ─────────────────────────────────────────────
 
 
-def train_phase2(cfg: Config, device: str) -> None:
+def train_phase2(
+    cfg: Config,
+    device: str,
+    phase1_ckpt: str | None = None,
+    knowledge_source: str | None = None,
+) -> None:
     """
     Phase 2 Fusion 预训练主入口。
 
@@ -355,8 +361,25 @@ def train_phase2(cfg: Config, device: str) -> None:
 
     _init_swanlab(cfg, accelerator)
 
+    knowledge_source = knowledge_source or "oracle"
+    if knowledge_source not in {"oracle", "phase1_router"}:
+        raise ValueError(
+            f"Phase 2 knowledge_source 仅支持 oracle/phase1_router，实际: {knowledge_source}"
+        )
+
     # ── §5.2  构建模型 ──
     modified_qwen, tokenizer = _build_modified_qwen(cfg, device)
+    retriever: Phase1Retriever | None = None
+    if knowledge_source == "phase1_router":
+        if not phase1_ckpt:
+            raise ValueError("Phase 2 使用 phase1_router 时必须提供 --from-phase1")
+        retriever = Phase1Retriever(
+            cfg=cfg,
+            phase1_ckpt=phase1_ckpt,
+            device=accelerator.device,
+            tokenizer=tokenizer,
+        )
+        logger.info("[Phase2Fusion] 已启用 Phase 1 frozen retrieval: %s", phase1_ckpt)
 
     # ── §5.3  构建优化器 & 调度器 ──
     # 仅对 requires_grad=True 的参数创建 optimizer
@@ -445,7 +468,11 @@ def train_phase2(cfg: Config, device: str) -> None:
             with accelerator.accumulate(modified_qwen):
                 output = modified_qwen(
                     input_ids=batch["input_ids"],
-                    knowledge_ids=batch["knowledge_ids"],
+                    knowledge_ids=(
+                        retriever.retrieve_from_tokens(batch["input_ids"], batch["attention_mask"])
+                        if retriever is not None
+                        else batch["knowledge_ids"]
+                    ),
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                 )

@@ -39,6 +39,7 @@ from config import Config
 from models.injection_modules import AttentionInjection
 from models.modified_model import ModifiedQwen
 from models.qwen_wrapper import KnowledgeEncoder, load_base_model
+from training.phase1_retriever import Phase1Retriever
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ class MedQASFTDataset(Dataset):
         tokenizer:         AutoTokenizer 实例
         max_seq_length:    SFT 序列最大 token 数（默认 256）
         fusion_length:     knowledge_ids 固定长度（默认 64）
+        anchor_length:     Router query 固定长度（默认 128）
         pad_token_id:      padding token id
     """
 
@@ -122,6 +124,7 @@ class MedQASFTDataset(Dataset):
         tokenizer: AutoTokenizer,
         max_seq_length: int,
         fusion_length: int,
+        anchor_length: int,
         pad_token_id: int,
     ) -> None:
         self.data = hf_dataset_split
@@ -129,6 +132,7 @@ class MedQASFTDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.fusion_length = fusion_length
+        self.anchor_length = anchor_length
         self.pad_token_id = pad_token_id
 
         # 默认知识（全 pad）：无命中时兜底，确保 knowledge_ids 维度一致
@@ -147,7 +151,8 @@ class MedQASFTDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Tensor]:
         """
         构建单条 SFT 样本：
-            input_ids, labels, attention_mask, knowledge_ids, knowledge_mask
+            input_ids, labels, attention_mask, knowledge_ids, knowledge_mask,
+            router_input_ids, router_attention_mask
         """
         row = self.data[idx]
         question: str = row["question"]
@@ -201,6 +206,14 @@ class MedQASFTDataset(Dataset):
         labels = torch.tensor(label_raw, dtype=torch.long)
         attention_mask = (input_ids != self.pad_token_id).long()
 
+        router_query_ids = prompt_ids[: self.anchor_length]
+        if len(router_query_ids) < self.anchor_length:
+            router_query_ids = router_query_ids + [self.pad_token_id] * (
+                self.anchor_length - len(router_query_ids)
+            )
+        router_input_ids = torch.tensor(router_query_ids, dtype=torch.long)
+        router_attention_mask = (router_input_ids != self.pad_token_id).long()
+
         # Phase 7: 知识查表（question[:200].strip() 作为 key）
         key = question[:200].strip()
         raw_k_ids: List[int] = self.knowledge_map.get(key, self.default_knowledge)
@@ -219,6 +232,8 @@ class MedQASFTDataset(Dataset):
             "attention_mask": attention_mask,
             "knowledge_ids": knowledge_ids,
             "knowledge_mask": knowledge_mask,
+            "router_input_ids": router_input_ids,
+            "router_attention_mask": router_attention_mask,
         }
 
 
@@ -232,6 +247,7 @@ def _evaluate_val_loss(
     accelerator: Accelerator,
     modified_qwen: nn.Module,
     val_loader: DataLoader,
+    retriever: Optional[Phase1Retriever] = None,
 ) -> float:
     """
     计算验证集平均 loss（用于早停判断）。
@@ -249,9 +265,14 @@ def _evaluate_val_loss(
     total_steps = torch.tensor(0, device=accelerator.device)
 
     for batch in val_loader:
+        knowledge_ids = (
+            retriever.retrieve_from_tokens(batch["router_input_ids"], batch["router_attention_mask"])
+            if retriever is not None
+            else batch["knowledge_ids"]
+        )
         output = modified_qwen(
             input_ids=batch["input_ids"],
-            knowledge_ids=batch["knowledge_ids"],
+            knowledge_ids=knowledge_ids,
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
         )
@@ -504,7 +525,13 @@ def _build_modified_qwen_phase3(
 # ─────────────────────────────────────────────
 
 
-def train_phase3(cfg: Config, device: str, phase2_ckpt: Optional[str] = None) -> None:
+def train_phase3(
+    cfg: Config,
+    device: str,
+    phase2_ckpt: Optional[str] = None,
+    phase1_ckpt: Optional[str] = None,
+    knowledge_source: Optional[str] = None,
+) -> None:
     """
     Phase 3 MedQA SFT 主入口。
 
@@ -533,8 +560,25 @@ def train_phase3(cfg: Config, device: str, phase2_ckpt: Optional[str] = None) ->
 
     _init_swanlab(cfg, accelerator)
 
+    knowledge_source = knowledge_source or "static"
+    if knowledge_source not in {"static", "phase1_router"}:
+        raise ValueError(
+            f"Phase 3 knowledge_source 仅支持 static/phase1_router，实际: {knowledge_source}"
+        )
+
     # ── §7.2  构建模型 ──
     modified_qwen, tokenizer = _build_modified_qwen_phase3(cfg, phase2_ckpt)
+    retriever: Optional[Phase1Retriever] = None
+    if knowledge_source == "phase1_router":
+        if not phase1_ckpt:
+            raise ValueError("Phase 3 使用 phase1_router 时必须提供 --from-phase1")
+        retriever = Phase1Retriever(
+            cfg=cfg,
+            phase1_ckpt=phase1_ckpt,
+            device=accelerator.device,
+            tokenizer=tokenizer,
+        )
+        logger.info("[Phase3SFT] 已启用 Phase 1 frozen retrieval: %s", phase1_ckpt)
 
     # ── §7.3  加载数据集 ──
     dataset_dir = str(Path(cfg.paths.data_dir) / "medqa" / "hf_dataset")
@@ -551,10 +595,13 @@ def train_phase3(cfg: Config, device: str, phase2_ckpt: Optional[str] = None) ->
     )
 
     # 知识映射（train + validation）
-    train_km_path = str(Path(cfg.paths.data_dir) / "medqa_knowledge_train.jsonl")
-    val_km_path = str(Path(cfg.paths.data_dir) / "medqa_knowledge_validation.jsonl")
-    train_knowledge_map = _load_knowledge_map(train_km_path)
-    val_knowledge_map = _load_knowledge_map(val_km_path)
+    train_knowledge_map: Dict[str, List[int]] = {}
+    val_knowledge_map: Dict[str, List[int]] = {}
+    if knowledge_source == "static":
+        train_km_path = str(Path(cfg.paths.data_dir) / "medqa_knowledge_train.jsonl")
+        val_km_path = str(Path(cfg.paths.data_dir) / "medqa_knowledge_validation.jsonl")
+        train_knowledge_map = _load_knowledge_map(train_km_path)
+        val_knowledge_map = _load_knowledge_map(val_km_path)
 
     # ── §7.4  构建 Dataset & DataLoader ──
     pad_id = tokenizer.pad_token_id
@@ -565,6 +612,7 @@ def train_phase3(cfg: Config, device: str, phase2_ckpt: Optional[str] = None) ->
         tokenizer=tokenizer,
         max_seq_length=cfg.data.phase3_max_seq_length,
         fusion_length=cfg.model.fusion_length,
+        anchor_length=cfg.model.anchor_length,
         pad_token_id=pad_id,
     )
     # Phase 3 使用 MedQA test split 作验证（与原实验评测集一致）
@@ -574,6 +622,7 @@ def train_phase3(cfg: Config, device: str, phase2_ckpt: Optional[str] = None) ->
         tokenizer=tokenizer,
         max_seq_length=cfg.data.phase3_max_seq_length,
         fusion_length=cfg.model.fusion_length,
+        anchor_length=cfg.model.anchor_length,
         pad_token_id=pad_id,
     )
 
@@ -641,9 +690,17 @@ def train_phase3(cfg: Config, device: str, phase2_ckpt: Optional[str] = None) ->
 
         for batch in train_loader:
             with accelerator.accumulate(modified_qwen):
+                knowledge_ids = (
+                    retriever.retrieve_from_tokens(
+                        batch["router_input_ids"],
+                        batch["router_attention_mask"],
+                    )
+                    if retriever is not None
+                    else batch["knowledge_ids"]
+                )
                 output = modified_qwen(
                     input_ids=batch["input_ids"],
-                    knowledge_ids=batch["knowledge_ids"],
+                    knowledge_ids=knowledge_ids,
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                 )
@@ -686,7 +743,12 @@ def train_phase3(cfg: Config, device: str, phase2_ckpt: Optional[str] = None) ->
         epoch_train_loss = epoch_loss_sum / max(epoch_steps, 1)
 
         # ── 验证 ──
-        epoch_val_loss = _evaluate_val_loss(accelerator, modified_qwen, val_loader)
+        epoch_val_loss = _evaluate_val_loss(
+            accelerator,
+            modified_qwen,
+            val_loader,
+            retriever=retriever,
+        )
         epoch_time = time.time() - epoch_start
 
         logger.info(

@@ -1,0 +1,118 @@
+#!/usr/bin/env python
+"""
+方案二：P1-Router -> P3-FusionInference
+
+输入一个问题与选项，先用 Phase 1 检索知识，再用 Phase 3 融合推理输出答案。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import load_config  # noqa: E402
+from training.phase1_retriever import Phase1Retriever  # noqa: E402
+from training.phase3_sft import _build_modified_qwen_phase3  # noqa: E402
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run Phase1 -> Phase3 frozen inference")
+    parser.add_argument("--config", default=str(PROJECT_ROOT / "config/default.yaml"))
+    parser.add_argument("--phase1-ckpt", default=str(PROJECT_ROOT / "checkpoints/phase1_best"))
+    parser.add_argument("--phase3-ckpt", default=str(PROJECT_ROOT / "checkpoints/phase3_best"))
+    parser.add_argument("--question", required=True)
+    parser.add_argument("--option-a", required=True)
+    parser.add_argument("--option-b", required=True)
+    parser.add_argument("--option-c", required=True)
+    parser.add_argument("--option-d", required=True)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--json", action="store_true", help="输出 JSON")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    cfg = load_config(args.config)
+    cfg.train.bf16 = args.device != "cpu"
+
+    prompt = (
+        f"Question: {args.question}\n"
+        f"A. {args.option_a}\n"
+        f"B. {args.option_b}\n"
+        f"C. {args.option_c}\n"
+        f"D. {args.option_d}\n"
+        f"Answer:"
+    )
+
+    retriever = Phase1Retriever(
+        cfg=cfg,
+        phase1_ckpt=args.phase1_ckpt,
+        device=args.device,
+    )
+    knowledge_ids = retriever.retrieve_from_texts([prompt])
+    knowledge_text = retriever.tokenizer.decode(
+        knowledge_ids[0][knowledge_ids[0] != retriever.tokenizer.pad_token_id].tolist(),
+        skip_special_tokens=True,
+    )
+
+    modified_qwen, tokenizer = _build_modified_qwen_phase3(cfg, args.phase3_ckpt)
+    modified_qwen = modified_qwen.to(args.device)
+    modified_qwen.eval()
+
+    encoded = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")
+    input_ids = encoded["input_ids"].to(args.device)
+    attention_mask = encoded["attention_mask"].to(args.device)
+
+    with torch.no_grad():
+        out = modified_qwen(
+            input_ids=input_ids,
+            knowledge_ids=knowledge_ids.to(args.device),
+            attention_mask=attention_mask,
+            labels=None,
+        )
+    last_idx = int(attention_mask.sum(dim=1).item() - 1)
+    next_logits = out.logits[0, last_idx]
+    topk = torch.topk(next_logits, k=5)
+    top5 = []
+    for score, idx in zip(topk.values.tolist(), topk.indices.tolist()):
+        top5.append(
+            {
+                "token_id": idx,
+                "token": tokenizer.decode([idx]).strip(),
+                "score": round(float(score), 4),
+            }
+        )
+
+    result = {
+        "prompt": prompt,
+        "knowledge_text": knowledge_text,
+        "pred_token": tokenizer.decode([int(topk.indices[0].item())]).strip(),
+        "top5": top5,
+    }
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("[Scheme2] Prompt:")
+        print(prompt)
+        print("\n[Scheme2] Retrieved Knowledge:")
+        print(knowledge_text)
+        print("\n[Scheme2] Predicted Next Token:")
+        print(result["pred_token"])
+        print("\n[Scheme2] Top-5:")
+        for item in top5:
+            print(item)
+
+
+if __name__ == "__main__":
+    main()
+
