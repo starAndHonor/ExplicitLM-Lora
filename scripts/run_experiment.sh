@@ -2,7 +2,9 @@
 # 单实验运行脚本
 #
 # 用法：
-#   bash scripts/run_experiment.sh e1
+#   ENC_MODE=qwen3 PHASE2_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+#     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash scripts/run_experiment.sh e1
 #   ENC_MODE=qwen3 PHASE2_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
 #     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment.sh e2
@@ -34,6 +36,8 @@ GPU_IDS="${GPU_IDS:-6,7}"
 DEVICE="${DEVICE:-cuda:0}"
 ENC_MODE="${ENC_MODE:-trainable}"
 OUTPUT="${OUTPUT:-}"
+E1_PHASE2_OUTPUT="${E1_PHASE2_OUTPUT:-}"
+E1_PHASE3_OUTPUT="${E1_PHASE3_OUTPUT:-}"
 MAX_SAMPLES="${MAX_SAMPLES:--1}"
 N_WARMUP="${N_WARMUP:-10}"
 N_MEASURE="${N_MEASURE:-200}"
@@ -82,6 +86,57 @@ if [ "${EXPERIMENT}" = "e3_multik" ] || [ "${EXPERIMENT}" = "e3k" ]; then
     exit 0
 fi
 
+if [ "${EXPERIMENT}" = "e1" ]; then
+    declare -a E1_OVERRIDE_ARGS=()
+    if [ "${ENC_MODE}" = "qwen3" ]; then
+        E1_OVERRIDE_ARGS+=(--override "model.knowledge_encoder_mode=qwen3")
+    fi
+
+    E1_PHASE2_OUTPUT="${E1_PHASE2_OUTPUT:-${OUTPUT}}"
+    E1_PHASE3_OUTPUT="${E1_PHASE3_OUTPUT:-}"
+
+    if [ -z "${E1_PHASE2_OUTPUT}" ]; then
+        E1_PHASE2_OUTPUT="results/e1/e1_sanity_check_$(exp_ckpt_tag "${PHASE2_WEIGHTS}").json"
+    fi
+    if [ -z "${E1_PHASE3_OUTPUT}" ]; then
+        E1_PHASE3_OUTPUT="results/e1/e1_sanity_check_$(exp_ckpt_tag "${PHASE3_WEIGHTS}").json"
+    fi
+
+    echo "[Experiment] name=${EXPERIMENT}"
+    echo "[Experiment] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+    echo "[Experiment] config=${CONFIG}"
+    echo "[Experiment] device=${DEVICE}"
+    echo "[Experiment] enc_mode=${ENC_MODE}"
+    echo "[Experiment] phase2_weights=${PHASE2_WEIGHTS}"
+    echo "[Experiment] phase3_weights=${PHASE3_WEIGHTS}"
+
+    for e1_weight in "${PHASE2_WEIGHTS}" "${PHASE3_WEIGHTS}"; do
+        if [ "${e1_weight}" = "${PHASE2_WEIGHTS}" ]; then
+            current_output="${E1_PHASE2_OUTPUT}"
+        else
+            current_output="${E1_PHASE3_OUTPUT}"
+        fi
+        declare -a E1_CMD=(
+            conda run --no-capture-output -n ExplicitLLM
+            python "${PROJECT_ROOT}/experiments/e1/run_e1.py"
+            --config "${CONFIG}"
+            --weights "${e1_weight}"
+            --max-samples "${MAX_SAMPLES}"
+            --output "${current_output}"
+        )
+        E1_CMD+=("${E1_OVERRIDE_ARGS[@]}")
+        E1_CMD+=("$@")
+        echo "[Experiment] e1_weights=${e1_weight}"
+        echo "[Experiment] output=${current_output}"
+        exp_print_cmd "${E1_CMD[@]}"
+        if [ "${DRY_RUN}" = "1" ]; then
+            continue
+        fi
+        "${E1_CMD[@]}"
+    done
+    exit 0
+fi
+
 declare -a CMD
 CMD=(conda run --no-capture-output -n ExplicitLLM python)
 
@@ -91,12 +146,6 @@ if [ "${ENC_MODE}" = "qwen3" ]; then
 fi
 
 case "${EXPERIMENT}" in
-    e1)
-        CMD+=("${PROJECT_ROOT}/experiments/e1/run_e1.py" --config "${CONFIG}" --weights "${E1_WEIGHTS}" --max-samples "${MAX_SAMPLES}")
-        if [ -n "${OUTPUT}" ]; then
-            CMD+=(--output "${OUTPUT}")
-        fi
-        ;;
     e2)
         CMD+=("${PROJECT_ROOT}/experiments/e2/run_e2.py" --config "${CONFIG}" --phase2-weights "${PHASE2_WEIGHTS}" --phase3-weights "${PHASE3_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
         if [ -n "${OUTPUT}" ]; then

@@ -31,6 +31,8 @@ PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase1_best}"
 PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase2_best}"
 PHASE3_WEIGHTS="${PHASE3_WEIGHTS:-checkpoints/phase3_best}"
 E1_WEIGHTS="${E1_WEIGHTS:-${PHASE2_WEIGHTS}}"
+E1_PHASE2_OUTPUT="${E1_PHASE2_OUTPUT:-}"
+E1_PHASE3_OUTPUT="${E1_PHASE3_OUTPUT:-}"
 OUTPUT="${OUTPUT:-}"
 E3_RESULT="${E3_RESULT:-}"
 E5_RESULT="${E5_RESULT:-}"
@@ -39,7 +41,9 @@ E5_RESULT_AUTO="${E5_RESULT_AUTO:-1}"
 if [ -z "${OUTPUT}" ]; then
     case "${EXPERIMENT}" in
         e1)
-            OUTPUT="results/e1/e1_sanity_check_$(exp_ckpt_tag "${E1_WEIGHTS}").json"
+            E1_PHASE2_OUTPUT="${E1_PHASE2_OUTPUT:-results/e1/e1_sanity_check_$(exp_ckpt_tag "${PHASE2_WEIGHTS}").json}"
+            E1_PHASE3_OUTPUT="${E1_PHASE3_OUTPUT:-results/e1/e1_sanity_check_$(exp_ckpt_tag "${PHASE3_WEIGHTS}").json}"
+            OUTPUT=""
             ;;
         e2)
             OUTPUT="results/e2/e2_cross_domain_$(exp_ckpt_tag "${PHASE2_WEIGHTS}")__$(exp_ckpt_tag "${PHASE3_WEIGHTS}").json"
@@ -75,7 +79,10 @@ if [ "${EXPERIMENT}" = "e6" ] && [ -z "${E3_RESULT}" ]; then
 fi
 
 echo "[ExperimentAuto] experiment=${EXPERIMENT}"
-if [ -n "${OUTPUT}" ]; then
+if [ "${EXPERIMENT}" = "e1" ]; then
+    echo "[ExperimentAuto] e1_phase2_output=${E1_PHASE2_OUTPUT}"
+    echo "[ExperimentAuto] e1_phase3_output=${E1_PHASE3_OUTPUT}"
+elif [ -n "${OUTPUT}" ]; then
     echo "[ExperimentAuto] output=${OUTPUT}"
 fi
 if [ -n "${E3_RESULT}" ] && [ "${EXPERIMENT}" = "e6" ]; then
@@ -87,6 +94,8 @@ fi
 
 OUTPUT="${OUTPUT}" \
 E1_WEIGHTS="${E1_WEIGHTS}" \
+E1_PHASE2_OUTPUT="${E1_PHASE2_OUTPUT}" \
+E1_PHASE3_OUTPUT="${E1_PHASE3_OUTPUT}" \
 E3_RESULT="${E3_RESULT}" \
 E5_RESULT="${E5_RESULT}" \
 PHASE1_WEIGHTS="${PHASE1_WEIGHTS}" \

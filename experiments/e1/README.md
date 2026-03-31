@@ -30,6 +30,14 @@ python experiments/e1/run_e1.py \
   --weights checkpoints/phase2_best
 ```
 
+When driven by `scripts/run_experiment*.sh`, `e1` is executed twice by default:
+
+- once with `PHASE2_WEIGHTS`
+- once with `PHASE3_WEIGHTS`
+
+This produces two result JSON files that are later grouped into the E1
+comparison table in `results/results_summary.md`.
+
 Current observed results:
 
 - `checkpoints/p2_qwen3_10ep/phase2_best`

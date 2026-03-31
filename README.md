@@ -81,6 +81,13 @@ checkpoints/p3_from_p2_qwen3_10ep
 - `counterfactual knowledge`
 - `no knowledge`（all-pad knowledge）
 
+自动实验链里，`e1` 会默认连续评测：
+
+- `PHASE2_WEIGHTS`
+- `PHASE3_WEIGHTS`
+
+并生成两份 JSON，供 `results_summary.md` 汇总成对比表。
+
 跑 `qwen3` 的 `Phase 2 best`：
 
 ```bash
