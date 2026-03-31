@@ -16,11 +16,14 @@
 # 环境变量：
 #   NUM_GPUS        使用 GPU 数量（默认 2）
 #   GPU_IDS         CUDA_VISIBLE_DEVICES（默认 6,7）
-#   FROM_PHASE2     Phase 2 最优 checkpoint 目录（默认 checkpoints/phase2_best）
+#   FROM_PHASE2     Phase 2 最优 checkpoint 目录（默认 checkpoints/phase2_best；
+#                   设为 none 可跳过 Phase 2 初始化，直接做 Phase 1 -> Phase 3）
+#   FROM_PHASE1     可选：Phase 1 checkpoint 目录（启用 frozen router 检索知识）
 #   CONFIG          配置文件路径（默认 config/default.yaml）
 #   ENC_MODE        知识编码模式（默认 trainable，可选 qwen3）
 #   FROM_TAG        Phase 2 实验标签，用于自动生成 Phase 3 输出目录
 #                   （默认取 FROM_PHASE2 目录名）
+#   KNOWLEDGE_SOURCE 知识来源（默认 static，可选 phase1_router）
 
 set -euo pipefail
 
@@ -34,11 +37,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 FROM_PHASE2="${FROM_PHASE2:-${PROJECT_ROOT}/checkpoints/phase2_best}"
+FROM_PHASE1="${FROM_PHASE1:-}"
 ENV_FILE="${PROJECT_ROOT}/.env"
 ENC_MODE="${ENC_MODE:-trainable}"
 FROM_TAG="${FROM_TAG:-$(basename "${FROM_PHASE2}")}"
 CKP_NAME="p3_from_${FROM_TAG}"
 CHECKPOINT_PATH="checkpoints/${CKP_NAME}"
+KNOWLEDGE_SOURCE="${KNOWLEDGE_SOURCE:-static}"
 
 # ── 项目环境变量（如 SwanLab API Key） ──
 if [ -f "${ENV_FILE}" ]; then
@@ -54,12 +59,16 @@ fi
 echo "[Phase3SFT] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, num_processes=${NUM_GPUS}"
 echo "[Phase3SFT] Config: ${CONFIG}"
 echo "[Phase3SFT] Phase 2 Checkpoint: ${FROM_PHASE2}"
+if [ -n "${FROM_PHASE1}" ]; then
+    echo "[Phase3SFT] Phase 1 Checkpoint: ${FROM_PHASE1}"
+fi
 echo "[Phase3SFT] Project: ${PROJECT_ROOT}"
 echo "[Phase3SFT] Encoder mode: ${ENC_MODE}"
 echo "[Phase3SFT] Checkpoint name: ${CKP_NAME}"
+echo "[Phase3SFT] Knowledge source: ${KNOWLEDGE_SOURCE}"
 
 # ── 检查 Phase 2 Checkpoint ──
-if [ ! -d "${FROM_PHASE2}" ]; then
+if [ "${FROM_PHASE2}" != "none" ] && [ ! -d "${FROM_PHASE2}" ]; then
     echo "[WARN] Phase 2 checkpoint 目录不存在: ${FROM_PHASE2}"
     echo "[INFO] 将使用随机初始化注入模块（建议先完成 Phase 2 训练）"
     echo "[INFO] 如已有 Phase 2 权重，请设置 FROM_PHASE2=<路径>"
@@ -100,14 +109,22 @@ conda run --no-capture-output -n ExplicitLLM python -c "import accelerate; impor
 # 否则可能命中 ~/.local/bin/accelerate，落回系统 Python。
 # 这里强制使用 ExplicitLLM 环境中的 `python -m accelerate.commands.launch`。
 echo "[Phase3SFT] 启动训练..."
-conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launch \
-    --num_processes "${NUM_GPUS}" \
-    --mixed_precision bf16 \
-    --main_process_port 29502 \
-    "${PROJECT_ROOT}/main.py" \
-    --config "${CONFIG}" \
-    --device cuda \
-    --override model.knowledge_encoder_mode="${ENC_MODE}" \
-    --override paths.checkpoint_dir="${CHECKPOINT_PATH}" \
-    "$@" \
-    train --phase 3 --from-phase2 "${FROM_PHASE2}"
+CMD=(
+    conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launch
+    --num_processes "${NUM_GPUS}"
+    --mixed_precision bf16
+    --main_process_port 29502
+    "${PROJECT_ROOT}/main.py"
+    --config "${CONFIG}"
+    --device cuda
+    --override model.knowledge_encoder_mode="${ENC_MODE}"
+    --override paths.checkpoint_dir="${CHECKPOINT_PATH}"
+)
+if [ "$#" -gt 0 ]; then
+    CMD+=("$@")
+fi
+CMD+=(train --phase 3 --from-phase2 "${FROM_PHASE2}" --knowledge-source "${KNOWLEDGE_SOURCE}")
+if [ -n "${FROM_PHASE1}" ]; then
+    CMD+=(--from-phase1 "${FROM_PHASE1}")
+fi
+"${CMD[@]}"

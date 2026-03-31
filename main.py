@@ -91,6 +91,13 @@ def _cmd_build_knowledge(cfg: Any, args: argparse.Namespace) -> None:
 def _cmd_train(cfg: Any, args: argparse.Namespace) -> None:
     """Phase 1-3: 训练管线。"""
     device = getattr(args, "device", "cpu")
+    phase1_ckpt = getattr(args, "from_phase1", None)
+    phase2_ckpt = getattr(args, "from_phase2", None)
+    if isinstance(phase1_ckpt, str) and phase1_ckpt.lower() in {"", "none", "null"}:
+        phase1_ckpt = None
+    if isinstance(phase2_ckpt, str) and phase2_ckpt.lower() in {"", "none", "null"}:
+        phase2_ckpt = None
+    knowledge_source = getattr(args, "knowledge_source", None)
     if args.phase == 1:
         from training.phase1_router import train_phase1
 
@@ -98,12 +105,22 @@ def _cmd_train(cfg: Any, args: argparse.Namespace) -> None:
     elif args.phase == 2:
         from training.phase2_fusion import train_phase2
 
-        train_phase2(cfg, device)
+        train_phase2(
+            cfg,
+            device,
+            phase1_ckpt=phase1_ckpt,
+            knowledge_source=knowledge_source,
+        )
     elif args.phase == 3:
         from training.phase3_sft import train_phase3
 
-        phase2_ckpt = getattr(args, "from_phase2", None)
-        train_phase3(cfg, device, phase2_ckpt=phase2_ckpt)
+        train_phase3(
+            cfg,
+            device,
+            phase2_ckpt=phase2_ckpt,
+            phase1_ckpt=phase1_ckpt,
+            knowledge_source=knowledge_source,
+        )
     else:
         print(f"[WARN] train --phase {args.phase}: 未知阶段")
 
@@ -195,6 +212,23 @@ def main() -> None:
         default=None,
         dest="from_phase2",
         help="Phase 3 专用：Phase 2 最优 checkpoint 目录（默认 checkpoints/phase2_best）",
+    )
+    train_parser.add_argument(
+        "--from-phase1",
+        type=str,
+        default=None,
+        dest="from_phase1",
+        help="Phase 2/3 可选：Phase 1 最优 checkpoint 目录（含 router.pt/store.pt）",
+    )
+    train_parser.add_argument(
+        "--knowledge-source",
+        type=str,
+        default=None,
+        choices=["oracle", "static", "phase1_router"],
+        help=(
+            "Phase 2/3 知识来源："
+            "phase2 用 oracle/phase1_router，phase3 用 static/phase1_router"
+        ),
     )
     subparsers.add_parser("eval", help="评测入口")
     answer_parser = subparsers.add_parser("answer", help="端到端 QA")
