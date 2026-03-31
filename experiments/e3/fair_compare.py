@@ -24,6 +24,13 @@ from experiments.e3.evaluator import eval_baseline, eval_fusion, eval_rag_compre
 logger = logging.getLogger(__name__)
 
 
+def _knowledge_map_path(default_path: str, k: int) -> str:
+    if k == 64:
+        return str(PROJECT_ROOT / default_path)
+    default = Path(default_path)
+    return str(PROJECT_ROOT / default.with_name(f"{default.stem}_k{k}{default.suffix}"))
+
+
 def _log_section(title: str) -> None:
     line = "=" * 16
     logger.info("%s %s %s", line, title, line)
@@ -244,17 +251,21 @@ def run_e3_all(
     cfg: Config,
     phase1_weights: str,
     phase2_weights: str,
+    k: int = 64,
     device: str = "cuda:0",
     max_samples: int = -1,
     output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     setup_logging()
+    if k not in {32, 64, 128, 256}:
+        raise ValueError(f"unsupported k: {k}")
     _log_section("🌍 E3 FAIR COMPARE")
     num_gpus = torch.cuda.device_count() if str(device).startswith("cuda") else 0
     logger.info(
-        "E3 start | phase1=%s | phase2=%s | device=%s | visible_gpus=%d",
+        "E3 start | phase1=%s | phase2=%s | k=%d | device=%s | visible_gpus=%d",
         phase1_weights,
         phase2_weights,
+        k,
         device,
         num_gpus,
     )
@@ -265,9 +276,9 @@ def run_e3_all(
         "mmlu": load_mmlu_rows(limit=max_samples),
     }
     knowledge_maps = {
-        "medqa": load_knowledge_map(str(PROJECT_ROOT / cfg.eval.medqa_knowledge_map)),
-        "arc": load_knowledge_map(str(PROJECT_ROOT / cfg.eval.arc_knowledge_map)),
-        "mmlu": load_knowledge_map(str(PROJECT_ROOT / cfg.eval.mmlu_knowledge_map)),
+        "medqa": load_knowledge_map(_knowledge_map_path(cfg.eval.medqa_knowledge_map, k)),
+        "arc": load_knowledge_map(_knowledge_map_path(cfg.eval.arc_knowledge_map, k)),
+        "mmlu": load_knowledge_map(_knowledge_map_path(cfg.eval.mmlu_knowledge_map, k)),
     }
     logger.info(
         "Datasets loaded | MedQA=%d | ARC=%d | MMLU=%d",
@@ -283,12 +294,13 @@ def run_e3_all(
         "device": device,
         "num_gpus": num_gpus,
         "max_samples": max_samples,
+        "k": k,
         "medqa": {},
         "arc": {},
         "mmlu": {},
     }
 
-    base_task = {"device": device, "knowledge_length": cfg.model.fusion_length}
+    base_task = {"device": device, "knowledge_length": k}
 
     _log_section("📌 PHASE A: G0 / G1 / G4")
     for ds_name in ("medqa", "arc", "mmlu"):
@@ -371,7 +383,7 @@ def run_e3_all(
     _print_report(results)
 
     if output_path is None:
-        output_path = str(PROJECT_ROOT / cfg.paths.results_dir / "e3" / "e3_fair_compare.json")
+        output_path = str(PROJECT_ROOT / cfg.paths.results_dir / "e3" / f"e3_fair_compare_k{k}.json")
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")

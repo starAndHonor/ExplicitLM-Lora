@@ -246,7 +246,8 @@ def _run_parallel(
 
 def run_e2_all(
     cfg: Config,
-    fusion_ckpt: str,
+    phase2_ckpt: str,
+    phase3_ckpt: str,
     device: str = "cuda:0",
     max_samples: int = -1,
     output_path: Optional[str] = None,
@@ -255,8 +256,9 @@ def run_e2_all(
     _log_section("🌍 E2 CROSS-DOMAIN EVALUATION")
     num_gpus = torch.cuda.device_count() if str(device).startswith("cuda") else 0
     logger.info(
-        "E2 start | ckpt=%s | device=%s | visible_gpus=%d",
-        fusion_ckpt,
+        "E2 start | phase2=%s | phase3=%s | device=%s | visible_gpus=%d",
+        phase2_ckpt,
+        phase3_ckpt,
         device,
         num_gpus,
     )
@@ -284,151 +286,142 @@ def run_e2_all(
 
     started = time.time()
     results: Dict[str, Any] = {
-        "weights": fusion_ckpt,
+        "phase2_weights": phase2_ckpt,
+        "phase3_weights": phase3_ckpt,
         "device": device,
         "num_gpus": num_gpus,
         "max_samples": max_samples,
     }
 
-    base_task = {
-        "device": device,
-        "fusion_ckpt": fusion_ckpt,
-        "knowledge_length": cfg.model.fusion_length,
-    }
+    def make_base_task(fusion_ckpt: str) -> Dict[str, Any]:
+        return {
+            "device": device,
+            "fusion_ckpt": fusion_ckpt,
+            "knowledge_length": cfg.model.fusion_length,
+        }
+
+    def run_baseline_and_fusions(
+        dataset_name: str,
+        rows: List[Dict[str, Any]],
+        knowledge_map: Dict[str, List[int]],
+    ) -> Dict[str, Any]:
+        baseline = _run_parallel(
+            cfg,
+            {
+                **make_base_task(phase2_ckpt),
+                "model_type": "baseline",
+                "dataset_name": dataset_name,
+                "rows": rows,
+                "knowledge_map": None,
+            },
+            num_gpus,
+        )
+
+        phase2 = {
+            "fusion_knowledge": _run_parallel(
+                cfg,
+                {
+                    **make_base_task(phase2_ckpt),
+                    "model_type": "injection",
+                    "dataset_name": dataset_name,
+                    "rows": rows,
+                    "knowledge_map": knowledge_map,
+                },
+                num_gpus,
+            ),
+            "fusion_empty": _run_parallel(
+                cfg,
+                {
+                    **make_base_task(phase2_ckpt),
+                    "model_type": "injection",
+                    "dataset_name": dataset_name,
+                    "rows": rows,
+                    "knowledge_map": None,
+                },
+                num_gpus,
+            ),
+        }
+
+        phase3 = {
+            "fusion_knowledge": _run_parallel(
+                cfg,
+                {
+                    **make_base_task(phase3_ckpt),
+                    "model_type": "injection",
+                    "dataset_name": dataset_name,
+                    "rows": rows,
+                    "knowledge_map": knowledge_map,
+                },
+                num_gpus,
+            ),
+            "fusion_empty": _run_parallel(
+                cfg,
+                {
+                    **make_base_task(phase3_ckpt),
+                    "model_type": "injection",
+                    "dataset_name": dataset_name,
+                    "rows": rows,
+                    "knowledge_map": None,
+                },
+                num_gpus,
+            ),
+        }
+
+        for phase_result in (phase2, phase3):
+            baseline_acc = baseline["acc"]
+            fusion_acc = phase_result["fusion_knowledge"]["acc"]
+            empty_acc = phase_result["fusion_empty"]["acc"]
+            phase_result["delta_acc"] = fusion_acc - baseline_acc
+            phase_result["delta_acc_empty"] = empty_acc - baseline_acc
+
+        return {
+            "baseline": baseline,
+            "phase2": phase2,
+            "phase3": phase3,
+            "phase3_vs_phase2": phase3["fusion_knowledge"]["acc"] - phase2["fusion_knowledge"]["acc"],
+        }
 
     _log_section("🩺 MEDQA")
-    results["medqa"] = {
-        "baseline": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "baseline",
-                "dataset_name": "medqa",
-                "rows": medqa_rows,
-                "knowledge_map": None,
-            },
-            num_gpus,
-        ),
-        "fusion_knowledge": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "injection",
-                "dataset_name": "medqa",
-                "rows": medqa_rows,
-                "knowledge_map": medqa_km,
-            },
-            num_gpus,
-        ),
-        "fusion_empty": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "injection",
-                "dataset_name": "medqa",
-                "rows": medqa_rows,
-                "knowledge_map": None,
-            },
-            num_gpus,
-        ),
-    }
+    results["medqa"] = run_baseline_and_fusions("medqa", medqa_rows, medqa_km)
 
     _log_section("🧪 ARC")
-    results["arc"] = {
-        "baseline": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "baseline",
-                "dataset_name": "arc",
-                "rows": arc_rows,
-                "knowledge_map": None,
-            },
-            num_gpus,
-        ),
-        "fusion_knowledge": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "injection",
-                "dataset_name": "arc",
-                "rows": arc_rows,
-                "knowledge_map": arc_km,
-            },
-            num_gpus,
-        ),
-        "fusion_empty": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "injection",
-                "dataset_name": "arc",
-                "rows": arc_rows,
-                "knowledge_map": None,
-            },
-            num_gpus,
-        ),
-    }
+    results["arc"] = run_baseline_and_fusions("arc", arc_rows, arc_km)
 
     _log_section("📚 MMLU")
-    results["mmlu"] = {
-        "baseline": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "baseline",
-                "dataset_name": "mmlu",
-                "rows": mmlu_rows,
-                "knowledge_map": None,
-            },
-            num_gpus,
-        ),
-        "fusion_knowledge": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "injection",
-                "dataset_name": "mmlu",
-                "rows": mmlu_rows,
-                "knowledge_map": mmlu_km,
-            },
-            num_gpus,
-        ),
-        "fusion_empty": _run_parallel(
-            cfg,
-            {
-                **base_task,
-                "model_type": "injection",
-                "dataset_name": "mmlu",
-                "rows": mmlu_rows,
-                "knowledge_map": None,
-            },
-            num_gpus,
-        ),
-    }
+    results["mmlu"] = run_baseline_and_fusions("mmlu", mmlu_rows, mmlu_km)
 
     for ds_name in ("medqa", "arc", "mmlu"):
-        baseline_acc = results[ds_name]["baseline"]["acc"]
-        fusion_acc = results[ds_name]["fusion_knowledge"]["acc"]
-        empty_acc = results[ds_name]["fusion_empty"]["acc"]
-        results[ds_name]["delta_acc"] = fusion_acc - baseline_acc
-        results[ds_name]["delta_acc_empty"] = empty_acc - baseline_acc
+        phase2 = results[ds_name]["phase2"]
+        phase3 = results[ds_name]["phase3"]
         logger.info(
-            "%s summary | baseline=%.4f | fusion=%.4f | empty=%.4f | delta=%+.4f | delta_empty=%+.4f",
+            "%s phase2 | baseline=%.4f | fusion=%.4f | empty=%.4f | delta=%+.4f | delta_empty=%+.4f",
             ds_name.upper(),
-            baseline_acc,
-            fusion_acc,
-            empty_acc,
-            results[ds_name]["delta_acc"],
-            results[ds_name]["delta_acc_empty"],
+            results[ds_name]["baseline"]["acc"],
+            phase2["fusion_knowledge"]["acc"],
+            phase2["fusion_empty"]["acc"],
+            phase2["delta_acc"],
+            phase2["delta_acc_empty"],
+        )
+        logger.info(
+            "%s phase3 | baseline=%.4f | fusion=%.4f | empty=%.4f | delta=%+.4f | delta_empty=%+.4f | vs_phase2=%+.4f",
+            ds_name.upper(),
+            results[ds_name]["baseline"]["acc"],
+            phase3["fusion_knowledge"]["acc"],
+            phase3["fusion_empty"]["acc"],
+            phase3["delta_acc"],
+            phase3["delta_acc_empty"],
+            results[ds_name]["phase3_vs_phase2"],
         )
 
     results["elapsed_sec"] = time.time() - started
     _log_section("📊 E2 SUMMARY")
 
     if output_path is None:
-        ckpt_name = Path(fusion_ckpt).name
-        output_path = str(PROJECT_ROOT / cfg.paths.results_dir / "e2" / f"e2_cross_domain_{ckpt_name}.json")
+        phase2_tag = Path(phase2_ckpt).parent.name + "_" + Path(phase2_ckpt).name
+        phase3_tag = Path(phase3_ckpt).parent.name + "_" + Path(phase3_ckpt).name
+        output_path = str(
+            PROJECT_ROOT / cfg.paths.results_dir / "e2" / f"e2_cross_domain_{phase2_tag}__{phase3_tag}.json"
+        )
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
