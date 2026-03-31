@@ -7,6 +7,9 @@
 #   ENC_MODE=qwen3 PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
 #     PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment_auto.sh e3
+#   ENC_MODE=qwen3 PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+#     PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash scripts/run_experiment_auto.sh e3_multik
 #   DRY_RUN=1 bash scripts/run_experiment_auto.sh e6
 
 set -euo pipefail
@@ -16,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_experiment_common.sh"
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: bash scripts/run_experiment_auto.sh <e1|e2|e3|e4|e5|e6> [extra args ...]"
+    echo "Usage: bash scripts/run_experiment_auto.sh <e1|e2|e3|e3_multik|e4|e5|e6> [extra args ...]"
     exit 1
 fi
 
@@ -26,6 +29,7 @@ shift
 FUSION_CKPT="${FUSION_CKPT:-checkpoints/phase2_best}"
 PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase2_best}"
 PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase3_best}"
+E2_PHASE3_CKPT="${E2_PHASE3_CKPT:-${PHASE2_WEIGHTS}}"
 OUTPUT="${OUTPUT:-}"
 E3_RESULT="${E3_RESULT:-}"
 E5_RESULT="${E5_RESULT:-}"
@@ -37,10 +41,13 @@ if [ -z "${OUTPUT}" ]; then
             OUTPUT="results/e1/e1_sanity_check_$(exp_ckpt_tag "${FUSION_CKPT}").json"
             ;;
         e2)
-            OUTPUT="results/e2/e2_cross_domain_$(exp_ckpt_tag "${FUSION_CKPT}").json"
+            OUTPUT="results/e2/e2_cross_domain_$(exp_ckpt_tag "${FUSION_CKPT}")__$(exp_ckpt_tag "${E2_PHASE3_CKPT}").json"
             ;;
         e3)
             OUTPUT="results/e3/e3_fair_compare_$(exp_ckpt_tag "${PHASE1_WEIGHTS}")__$(exp_ckpt_tag "${PHASE2_WEIGHTS}").json"
+            ;;
+        e3_multik|e3k)
+            OUTPUT=""
             ;;
         e4)
             OUTPUT="results/e4/e4_sft_ablation_$(exp_ckpt_tag "${PHASE1_WEIGHTS}")__$(exp_ckpt_tag "${PHASE2_WEIGHTS}").json"
@@ -67,7 +74,9 @@ if [ "${EXPERIMENT}" = "e6" ] && [ -z "${E3_RESULT}" ]; then
 fi
 
 echo "[ExperimentAuto] experiment=${EXPERIMENT}"
-echo "[ExperimentAuto] output=${OUTPUT}"
+if [ -n "${OUTPUT}" ]; then
+    echo "[ExperimentAuto] output=${OUTPUT}"
+fi
 if [ -n "${E3_RESULT}" ] && [ "${EXPERIMENT}" = "e6" ]; then
     echo "[ExperimentAuto] e3_result=${E3_RESULT}"
 fi
@@ -79,6 +88,7 @@ OUTPUT="${OUTPUT}" \
 E3_RESULT="${E3_RESULT}" \
 E5_RESULT="${E5_RESULT}" \
 FUSION_CKPT="${FUSION_CKPT}" \
+E2_PHASE3_CKPT="${E2_PHASE3_CKPT}" \
 PHASE1_WEIGHTS="${PHASE1_WEIGHTS}" \
 PHASE2_WEIGHTS="${PHASE2_WEIGHTS}" \
 bash "${SCRIPT_DIR}/run_experiment.sh" "${EXPERIMENT}" "$@"

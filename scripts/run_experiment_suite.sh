@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键实验总控脚本
 #
-# 默认顺序：E1 -> E2 -> E3 -> E4 -> E5 -> E6
+# 默认顺序：E1 -> E2 -> E3 -> E3 multi-k -> E4 -> E5 -> E6
 #
 # 用法：
 #   ENC_MODE=qwen3 \
@@ -12,6 +12,7 @@
 #
 #   只跑部分实验：
 #   EXPERIMENTS="e1 e2 e6" bash scripts/run_experiment_suite.sh
+#   EXPERIMENTS="e1 e2 e3_multik e5" bash scripts/run_experiment_suite.sh
 #
 #   只看命令不执行：
 #   DRY_RUN=1 bash scripts/run_experiment_suite.sh
@@ -22,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_experiment_common.sh"
 
-EXPERIMENTS="${EXPERIMENTS:-e1 e2 e3 e4 e5 e6}"
+EXPERIMENTS="${EXPERIMENTS:-e1 e2 e3 e3_multik e4 e5 e6}"
 FUSION_CKPT="${FUSION_CKPT:-checkpoints/phase2_best}"
 PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase2_best}"
 PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase3_best}"

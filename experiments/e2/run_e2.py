@@ -16,9 +16,14 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run E2 cross-domain experiment")
     parser.add_argument("--config", default="config/default.yaml", help="config file path")
     parser.add_argument(
-        "--fusion-ckpt",
+        "--phase2-ckpt",
         default="checkpoints/phase2_best",
-        help="fusion checkpoint directory",
+        help="phase2 fusion checkpoint directory",
+    )
+    parser.add_argument(
+        "--phase3-ckpt",
+        default="checkpoints/phase3_best",
+        help="phase3 fusion checkpoint directory",
     )
     parser.add_argument("--device", default="cuda:0", help="device, e.g. cuda:0 or cpu")
     parser.add_argument(
@@ -67,14 +72,20 @@ def _parse_overrides(overrides: Optional[Iterable[str | List[str]]]) -> dict[str
 def main() -> None:
     args = _parse_args()
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
-    fusion_ckpt = (
-        str(Path(args.fusion_ckpt).resolve())
-        if Path(args.fusion_ckpt).is_absolute()
-        else str((Path(__file__).resolve().parents[2] / args.fusion_ckpt).resolve())
+    phase2_ckpt = (
+        str(Path(args.phase2_ckpt).resolve())
+        if Path(args.phase2_ckpt).is_absolute()
+        else str((Path(__file__).resolve().parents[2] / args.phase2_ckpt).resolve())
+    )
+    phase3_ckpt = (
+        str(Path(args.phase3_ckpt).resolve())
+        if Path(args.phase3_ckpt).is_absolute()
+        else str((Path(__file__).resolve().parents[2] / args.phase3_ckpt).resolve())
     )
     run_e2_all(
         cfg=cfg,
-        fusion_ckpt=fusion_ckpt,
+        phase2_ckpt=phase2_ckpt,
+        phase3_ckpt=phase3_ckpt,
         device=args.device,
         max_samples=args.max_samples,
         output_path=args.output,

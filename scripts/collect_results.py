@@ -117,6 +117,7 @@ def _config_summary(data: dict[str, Any]) -> list[str]:
         ("weights", "Weights"),
         ("phase1_weights", "Phase1 Weights"),
         ("phase2_weights", "Phase2 Weights"),
+        ("k", "Knowledge Budget"),
         ("device", "Device"),
         ("num_gpus", "Num GPUs"),
         ("max_samples", "Max Samples"),
@@ -238,31 +239,68 @@ def _summarize_e1_group(paths: list[Path]) -> Section | None:
 
 
 def _summarize_e2(path: Path, data: dict[str, Any]) -> Section:
-    rows: list[list[str]] = []
+    lines = _config_summary(data)
+
+    def ds_label(ds: str, total: Any) -> str:
+        if ds == "medqa":
+            return f"MedQA（{total:,} 题）" if isinstance(total, int) else "MedQA"
+        if ds == "arc":
+            return f"ARC-Challenge（{total:,} 题）" if isinstance(total, int) else "ARC-Challenge"
+        return f"MMLU（{total:,} 题）" if isinstance(total, int) else "MMLU"
+
+    has_multi_phase = any(isinstance(data.get(ds, {}).get("phase2"), dict) for ds in ("medqa", "arc", "mmlu"))
+    if not has_multi_phase:
+        rows: list[list[str]] = []
+        for ds in ("medqa", "arc", "mmlu"):
+            ds_data = data.get(ds, {})
+            total = ds_data.get("baseline", {}).get("total", "-")
+            rows.append([
+                ds_label(ds, total),
+                _pct(ds_data.get("baseline", {}).get("acc")),
+                _pct(ds_data.get("fusion_knowledge", {}).get("acc")),
+                _pct(ds_data.get("fusion_empty", {}).get("acc")),
+                _signed_pct(ds_data.get("delta_acc")),
+            ])
+        lines.extend(_table(["数据集", "Baseline", "Fusion+知识", "Fusion+空知识", "Δacc"], rows))
+        return Section("E2", lines)
+
+    lines.extend(["**Phase 2**", ""])
+    phase2_rows: list[list[str]] = []
+    phase3_rows: list[list[str]] = []
+    compare_rows: list[list[str]] = []
     for ds in ("medqa", "arc", "mmlu"):
         ds_data = data.get(ds, {})
         total = ds_data.get("baseline", {}).get("total", "-")
-        if ds == "medqa":
-            ds_label = f"MedQA（{total:,} 题）" if isinstance(total, int) else "MedQA"
-        elif ds == "arc":
-            ds_label = f"ARC-Challenge（{total:,} 题）" if isinstance(total, int) else "ARC-Challenge"
-        else:
-            ds_label = f"MMLU（{total:,} 题）" if isinstance(total, int) else "MMLU"
-        rows.append([
-            ds_label,
-            _pct(ds_data.get("baseline", {}).get("acc")),
-            _pct(ds_data.get("fusion_knowledge", {}).get("acc")),
-            _pct(ds_data.get("fusion_empty", {}).get("acc")),
-            ("+" if isinstance(ds_data.get("delta_acc"), (int, float)) and ds_data.get("delta_acc") >= 0 else "") + _pct(ds_data.get("delta_acc")),
+        label = ds_label(ds, total)
+        baseline = _pct(ds_data.get("baseline", {}).get("acc"))
+        phase2 = ds_data.get("phase2", {})
+        phase3 = ds_data.get("phase3", {})
+        phase2_rows.append([
+            label,
+            baseline,
+            _pct(phase2.get("fusion_knowledge", {}).get("acc")),
+            _pct(phase2.get("fusion_empty", {}).get("acc")),
+            _signed_pct(phase2.get("delta_acc")),
         ])
-    return Section(
-        "E2",
-        _config_summary(data)
-        + _table(
-            ["数据集", "Baseline", "Fusion+知识", "Fusion+空知识", "Δacc"],
-            rows,
-        ),
-    )
+        phase3_rows.append([
+            label,
+            baseline,
+            _pct(phase3.get("fusion_knowledge", {}).get("acc")),
+            _pct(phase3.get("fusion_empty", {}).get("acc")),
+            _signed_pct(phase3.get("delta_acc")),
+        ])
+        compare_rows.append([
+            label,
+            _signed_pct(phase2.get("delta_acc")),
+            _signed_pct(phase3.get("delta_acc")),
+            _signed_pct(ds_data.get("phase3_vs_phase2")),
+        ])
+    lines.extend(_table(["数据集", "Baseline", "Fusion+知识", "Fusion+空知识", "Δacc"], phase2_rows))
+    lines.extend(["", "**Phase 3**", ""])
+    lines.extend(_table(["数据集", "Baseline", "Fusion+知识", "Fusion+空知识", "Δacc"], phase3_rows))
+    lines.extend(["", "**Phase 3 vs Phase 2**", ""])
+    lines.extend(_table(["数据集", "Phase2 Δacc", "Phase3 Δacc", "Phase3-Phase2"], compare_rows))
+    return Section("E2", lines)
 
 
 def _summarize_e3(path: Path, data: dict[str, Any]) -> Section:
@@ -289,6 +327,65 @@ def _summarize_e3(path: Path, data: dict[str, Any]) -> Section:
         + ["", "*Efficiency*", ""]
         + _table(["数据集", "G2 效率", "G3 效率"], rows_eff),
     )
+
+
+def _summarize_e3_multik(paths: list[Path]) -> Section | None:
+    entries: list[tuple[int, Path, dict[str, Any]]] = []
+    phase1_weight = None
+    phase2_weight = None
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        k = data.get("k")
+        if not isinstance(k, int):
+            continue
+        if phase1_weight is None:
+            phase1_weight = _ckpt_label(data.get("phase1_weights"))
+            phase2_weight = _ckpt_label(data.get("phase2_weights"))
+        entries.append((k, path, data))
+    if len(entries) < 2:
+        return None
+    entries.sort(key=lambda item: item[0])
+
+    lines = [
+        "**Config**",
+        "",
+        f"- `Phase1 Weights`: `{phase1_weight}`",
+        f"- `Phase2 Weights`: `{phase2_weight}`",
+        f"- `Knowledge Budgets`: `{[k for k, _, _ in entries]}`",
+        "",
+        "**Multi-k Summary**",
+        "",
+    ]
+
+    for ds_name, ds_label in (("medqa", "MedQA"), ("arc", "ARC"), ("mmlu", "MMLU")):
+        rows_main: list[list[str]] = []
+        rows_eff: list[list[str]] = []
+        for k, _, data in entries:
+            ds = data.get(ds_name, {})
+            summary = data.get("summary", {}).get(ds_name, {})
+            rows_main.append([
+                str(k),
+                _pct(ds.get("G1_rag_compressed", {}).get("acc")),
+                _pct(ds.get("G2_fusion_phase1", {}).get("acc")),
+                _pct(ds.get("G3_fusion_phase2", {}).get("acc")),
+                _pct(ds.get("G4_rag_original", {}).get("acc")),
+            ])
+            rows_eff.append([
+                str(k),
+                _pct(summary.get("efficiency_G2")),
+                _pct(summary.get("efficiency_G3")),
+            ])
+        lines.append(f"**{ds_label}**")
+        lines.append("")
+        lines.extend(_table(["k", "G1 RAG-compressed", "G2 Fusion-Phase1", "G3 Fusion-Phase2", "G4 RAG-original"], rows_main))
+        lines.extend(["", "*Efficiency*", ""])
+        lines.extend(_table(["k", "G2 效率", "G3 效率"], rows_eff))
+        lines.append("")
+
+    return Section("E3", lines)
 
 
 def _summarize_e4(path: Path, data: dict[str, Any]) -> Section:
@@ -550,6 +647,11 @@ def build_summary() -> str:
     e1_section = _summarize_e1_group(e1_paths)
     if e1_section is not None:
         sections_by_exp["E1"].append(e1_section)
+
+    e3_paths = [path for path in all_paths if path.parent.name.lower() == "e3" or path.name.lower().startswith("e3_")]
+    e3_multik_section = _summarize_e3_multik(e3_paths)
+    if e3_multik_section is not None:
+        sections_by_exp["E3"].append(e3_multik_section)
 
     for path in all_paths:
         section = _make_section(path)

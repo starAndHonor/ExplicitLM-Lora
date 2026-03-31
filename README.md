@@ -105,32 +105,47 @@ python experiments/e1/run_e1.py \
 
 ### E2 Cross-Domain
 
-跑 `qwen3` 的 `Phase 2 best`：
+当前 `E2` 会同时评测：
+
+- `Phase 2 checkpoint`
+- `Phase 3 checkpoint`
+
+并输出：
+
+- `Phase 2` 表
+- `Phase 3` 表
+- `Phase3 vs Phase2` 对比
+
+跑 `qwen3` 的 `Phase 2 / Phase 3`：
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e2/run_e2.py \
   --config config/default.yaml \
-  --fusion-ckpt checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase2-ckpt checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase3-ckpt checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --device cuda:0 \
-  --output results/e2/e2_cross_domain_p2_qwen3_10ep_phase2_best.json
+  --output results/e2/e2_cross_domain_p2_qwen3_10ep_phase2_best__p3_from_p2_qwen3_10ep_phase3_best.json
 ```
 
-跑当前默认 `trainable` 的 `Phase 2 best`：
+跑当前默认 `trainable` 的 `Phase 2 / Phase 3`：
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e2/run_e2.py \
   --config config/default.yaml \
-  --fusion-ckpt checkpoints/phase2_best \
+  --phase2-ckpt checkpoints/phase2_best \
+  --phase3-ckpt checkpoints/phase3_best \
   --device cuda:0 \
-  --output results/e2/e2_cross_domain_phase2_best.json
+  --output results/e2/e2_cross_domain_phase2_best__phase3_best.json
 ```
 
 ### E3 Fair Compare
 
-跑 `qwen3` 的 `Phase 2/Phase 3`：
+默认 `E3` 仍然是 `k=64`。
+
+跑 `qwen3` 的 `Phase 2/Phase 3`（默认 `k=64`）：
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
@@ -151,6 +166,38 @@ python experiments/e3/run_e3.py \
   --phase1-weights checkpoints/phase2_best \
   --phase2-weights checkpoints/phase3_best \
   --device cuda:0
+```
+
+跑单个自定义 token 预算（例如 `k=128`）：
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
+python experiments/e3/run_e3.py \
+  --config config/default.yaml \
+  --phase1-weights checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --k 128 \
+  --override model.knowledge_encoder_mode=qwen3 \
+  --device cuda:0
+```
+
+一口气跑 `k=32/64/128/256`：
+
+```bash
+ENC_MODE=qwen3 \
+GPU_IDS=2,3 \
+PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+bash scripts/run_e3_multik.sh
+```
+
+也可以走统一实验脚本：
+
+```bash
+ENC_MODE=qwen3 \
+PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+bash scripts/run_experiment_auto.sh e3_multik
 ```
 
 ### E4 SFT Ablation

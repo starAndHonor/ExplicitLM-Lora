@@ -7,6 +7,9 @@
 #     bash scripts/run_experiment.sh e2
 #   ENC_MODE=qwen3 PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
 #     PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash scripts/run_experiment.sh e3_multik
+#   ENC_MODE=qwen3 PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+#     PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment.sh e3
 #   DRY_RUN=1 bash scripts/run_experiment.sh e6
 
@@ -17,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_experiment_common.sh"
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: bash scripts/run_experiment.sh <e1|e2|e3|e4|e5|e6> [extra args ...]"
+    echo "Usage: bash scripts/run_experiment.sh <e1|e2|e3|e3_multik|e4|e5|e6> [extra args ...]"
     exit 1
 fi
 
@@ -41,6 +44,7 @@ REBUILD="${REBUILD:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
 FUSION_CKPT="${FUSION_CKPT:-checkpoints/phase2_best}"
+E2_PHASE3_CKPT="${E2_PHASE3_CKPT:-${PHASE2_WEIGHTS:-checkpoints/phase3_best}}"
 PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase2_best}"
 PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase3_best}"
 
@@ -58,6 +62,25 @@ case "${EXPERIMENT}" in
         ;;
 esac
 
+if [ "${EXPERIMENT}" = "e3_multik" ] || [ "${EXPERIMENT}" = "e3k" ]; then
+    echo "[Experiment] name=${EXPERIMENT}"
+    echo "[Experiment] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+    echo "[Experiment] config=${CONFIG}"
+    echo "[Experiment] device=${DEVICE}"
+    echo "[Experiment] enc_mode=${ENC_MODE}"
+    CONFIG="${CONFIG}" \
+    NUM_GPUS="${NUM_GPUS}" \
+    GPU_IDS="${GPU_IDS}" \
+    DEVICE="${DEVICE}" \
+    ENC_MODE="${ENC_MODE}" \
+    MAX_SAMPLES="${MAX_SAMPLES}" \
+    PHASE1_WEIGHTS="${PHASE1_WEIGHTS}" \
+    PHASE2_WEIGHTS="${PHASE2_WEIGHTS}" \
+    DRY_RUN="${DRY_RUN}" \
+    bash "${SCRIPT_DIR}/run_e3_multik.sh"
+    exit 0
+fi
+
 declare -a CMD
 CMD=(conda run --no-capture-output -n ExplicitLLM python)
 
@@ -74,7 +97,7 @@ case "${EXPERIMENT}" in
         fi
         ;;
     e2)
-        CMD+=("${PROJECT_ROOT}/experiments/e2/run_e2.py" --config "${CONFIG}" --fusion-ckpt "${FUSION_CKPT}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
+        CMD+=("${PROJECT_ROOT}/experiments/e2/run_e2.py" --config "${CONFIG}" --phase2-ckpt "${FUSION_CKPT}" --phase3-ckpt "${E2_PHASE3_CKPT}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
         if [ -n "${OUTPUT}" ]; then
             CMD+=(--output "${OUTPUT}")
         fi
