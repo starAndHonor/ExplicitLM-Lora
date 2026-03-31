@@ -369,9 +369,11 @@ def _init_swanlab(cfg: Config, accelerator: Accelerator) -> None:
     try:
         import swanlab  # type: ignore[import]
 
-        swanlab.init(
-            project="explicit-lora-phase3",
-            config={
+        project = os.environ.get("SWANLAB_PROJECT", "explicit-lora-phase3")
+        run_name = os.environ.get("SWANLAB_RUN_NAME")
+        init_kwargs = {
+            "project": project,
+            "config": {
                 "phase": 3,
                 "lr": cfg.train.phase3_lr,
                 "batch_size": cfg.train.phase3_batch_size,
@@ -384,8 +386,16 @@ def _init_swanlab(cfg: Config, accelerator: Accelerator) -> None:
                 "encoder_depth": cfg.model.encoder_depth,
                 "injection_layers": cfg.model.injection_layers,
             },
+        }
+        if run_name:
+            init_kwargs["name"] = run_name
+
+        swanlab.init(**init_kwargs)
+        logger.info(
+            "[Phase3SFT] SwanLab 初始化完成（project=%s, run_name=%s）",
+            project,
+            run_name or "<default>",
         )
-        logger.info("[Phase3SFT] SwanLab 初始化完成（project=explicit-lora-phase3）")
     except Exception as exc:  # pragma: no cover
         logger.warning("[Phase3SFT] SwanLab 初始化失败（已跳过）: %s", exc)
 

@@ -10,6 +10,8 @@
 #   ENC_MODE       知识编码模式（默认 trainable）
 #   EPOCHS         Phase 2 训练轮数（默认 10）
 #   TAG            Phase 2 标签（默认 router）
+#   SWANLAB_PROJECT_P2  Phase 2 SwanLab 项目名（默认 explicit-lora-p2）
+#   SWANLAB_PROJECT_P3  Phase 3 SwanLab 项目名（默认 explicit-lora-p3）
 #   NUM_GPUS       GPU 数量
 #   GPU_IDS        CUDA_VISIBLE_DEVICES
 
@@ -24,6 +26,11 @@ EPOCHS="${EPOCHS:-10}"
 TAG="${TAG:-router}"
 NUM_GPUS="${NUM_GPUS:-2}"
 GPU_IDS="${GPU_IDS:-6,7}"
+SWANLAB_PROJECT_P2="${SWANLAB_PROJECT_P2:-explicit-lora-p2}"
+SWANLAB_PROJECT_P3="${SWANLAB_PROJECT_P3:-explicit-lora-p3}"
+
+P2_RUN_NAME="scheme1_router_${ENC_MODE}_${EPOCHS}ep"
+P3_RUN_NAME="scheme1_from_router_${ENC_MODE}"
 
 echo "[Scheme1] Step 1/3: Phase 1 Router"
 NUM_GPUS="${NUM_GPUS}" GPU_IDS="${GPU_IDS}" \
@@ -36,6 +43,8 @@ FROM_PHASE1="${PHASE1_CKPT}" \
 ENC_MODE="${ENC_MODE}" \
 EPOCHS="${EPOCHS}" \
 TAG="${TAG}" \
+SWANLAB_PROJECT="${SWANLAB_PROJECT_P2}" \
+SWANLAB_RUN_NAME="${P2_RUN_NAME}" \
     bash "${SCRIPT_DIR}/run_phase2_fusion.sh"
 
 P2_DIR="checkpoints/p2_${ENC_MODE}_${EPOCHS}ep"
@@ -50,5 +59,6 @@ FROM_PHASE1="${PHASE1_CKPT}" \
 FROM_PHASE2="${P2_DIR}/phase2_best" \
 FROM_TAG="$(basename "${P2_DIR}")" \
 ENC_MODE="${ENC_MODE}" \
+SWANLAB_PROJECT="${SWANLAB_PROJECT_P3}" \
+SWANLAB_RUN_NAME="${P3_RUN_NAME}" \
     bash "${SCRIPT_DIR}/run_phase3_sft.sh" --override data.num_workers=0
-
