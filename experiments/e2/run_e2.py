@@ -15,11 +15,10 @@ from experiments.e2.cross_domain_runner import run_e2_all
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run E2 cross-domain experiment")
     parser.add_argument("--config", default="config/default.yaml", help="config file path")
-    parser.add_argument(
-        "--fusion-ckpt",
-        default="checkpoints/phase2_best",
-        help="fusion checkpoint directory",
-    )
+    parser.add_argument("--phase2-weights", default="checkpoints/phase2_best", help="Phase 2 checkpoint directory")
+    parser.add_argument("--phase3-weights", default="checkpoints/phase3_best", help="Phase 3 checkpoint directory")
+    parser.add_argument("--phase2-ckpt", dest="phase2_weights", help=argparse.SUPPRESS)
+    parser.add_argument("--phase3-ckpt", dest="phase3_weights", help=argparse.SUPPRESS)
     parser.add_argument("--device", default="cuda:0", help="device, e.g. cuda:0 or cpu")
     parser.add_argument(
         "--max-samples",
@@ -67,14 +66,20 @@ def _parse_overrides(overrides: Optional[Iterable[str | List[str]]]) -> dict[str
 def main() -> None:
     args = _parse_args()
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
-    fusion_ckpt = (
-        str(Path(args.fusion_ckpt).resolve())
-        if Path(args.fusion_ckpt).is_absolute()
-        else str((Path(__file__).resolve().parents[2] / args.fusion_ckpt).resolve())
+    phase2_weights = (
+        str(Path(args.phase2_weights).resolve())
+        if Path(args.phase2_weights).is_absolute()
+        else str((Path(__file__).resolve().parents[2] / args.phase2_weights).resolve())
+    )
+    phase3_weights = (
+        str(Path(args.phase3_weights).resolve())
+        if Path(args.phase3_weights).is_absolute()
+        else str((Path(__file__).resolve().parents[2] / args.phase3_weights).resolve())
     )
     run_e2_all(
         cfg=cfg,
-        fusion_ckpt=fusion_ckpt,
+        phase2_weights=phase2_weights,
+        phase3_weights=phase3_weights,
         device=args.device,
         max_samples=args.max_samples,
         output_path=args.output,

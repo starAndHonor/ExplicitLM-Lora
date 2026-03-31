@@ -3,10 +3,11 @@
 #
 # 用法：
 #   bash scripts/run_experiment.sh e1
-#   ENC_MODE=qwen3 FUSION_CKPT=checkpoints/p2_qwen3_10ep/phase2_best \
+#   ENC_MODE=qwen3 PHASE2_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+#     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment.sh e2
-#   ENC_MODE=qwen3 PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
-#     PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#   ENC_MODE=qwen3 PHASE2_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+#     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment.sh e3
 #   DRY_RUN=1 bash scripts/run_experiment.sh e6
 
@@ -40,9 +41,10 @@ BUILD_MISSING="${BUILD_MISSING:-0}"
 REBUILD="${REBUILD:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
-FUSION_CKPT="${FUSION_CKPT:-checkpoints/phase2_best}"
-PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase2_best}"
-PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase3_best}"
+PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase1_best}"
+PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase2_best}"
+PHASE3_WEIGHTS="${PHASE3_WEIGHTS:-checkpoints/phase3_best}"
+E1_WEIGHTS="${E1_WEIGHTS:-${PHASE2_WEIGHTS}}"
 
 exp_load_env
 
@@ -68,25 +70,25 @@ fi
 
 case "${EXPERIMENT}" in
     e1)
-        CMD+=("${PROJECT_ROOT}/experiments/e1/run_e1.py" --config "${CONFIG}" --fusion-ckpt "${FUSION_CKPT}" --max-samples "${MAX_SAMPLES}")
+        CMD+=("${PROJECT_ROOT}/experiments/e1/run_e1.py" --config "${CONFIG}" --weights "${E1_WEIGHTS}" --max-samples "${MAX_SAMPLES}")
         if [ -n "${OUTPUT}" ]; then
             CMD+=(--output "${OUTPUT}")
         fi
         ;;
     e2)
-        CMD+=("${PROJECT_ROOT}/experiments/e2/run_e2.py" --config "${CONFIG}" --fusion-ckpt "${FUSION_CKPT}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
+        CMD+=("${PROJECT_ROOT}/experiments/e2/run_e2.py" --config "${CONFIG}" --phase2-weights "${PHASE2_WEIGHTS}" --phase3-weights "${PHASE3_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
         if [ -n "${OUTPUT}" ]; then
             CMD+=(--output "${OUTPUT}")
         fi
         ;;
     e3)
-        CMD+=("${PROJECT_ROOT}/experiments/e3/run_e3.py" --config "${CONFIG}" --phase1-weights "${PHASE1_WEIGHTS}" --phase2-weights "${PHASE2_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
+        CMD+=("${PROJECT_ROOT}/experiments/e3/run_e3.py" --config "${CONFIG}" --phase2-weights "${PHASE2_WEIGHTS}" --phase3-weights "${PHASE3_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
         if [ -n "${OUTPUT}" ]; then
             CMD+=(--output "${OUTPUT}")
         fi
         ;;
     e4)
-        CMD+=("${PROJECT_ROOT}/experiments/e4/run_e4.py" --config "${CONFIG}" --phase1-weights "${PHASE1_WEIGHTS}" --phase2-weights "${PHASE2_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
+        CMD+=("${PROJECT_ROOT}/experiments/e4/run_e4.py" --config "${CONFIG}" --phase2-weights "${PHASE2_WEIGHTS}" --phase3-weights "${PHASE3_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
         if [ -n "${OUTPUT}" ]; then
             CMD+=(--output "${OUTPUT}")
         fi
@@ -99,7 +101,7 @@ case "${EXPERIMENT}" in
                 CMD+=(--rebuild)
             fi
         else
-            CMD+=(--phase1-weights "${PHASE1_WEIGHTS}" --phase2-weights "${PHASE2_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
+            CMD+=(--phase2-weights "${PHASE2_WEIGHTS}" --phase3-weights "${PHASE3_WEIGHTS}" --device "${DEVICE}" --max-samples "${MAX_SAMPLES}")
             if [ "${BUILD_MISSING}" = "1" ]; then
                 CMD+=(--build-missing)
             fi
@@ -109,7 +111,7 @@ case "${EXPERIMENT}" in
         fi
         ;;
     e6)
-        CMD+=("${PROJECT_ROOT}/experiments/e6/run_e6.py" --config "${CONFIG}" --phase2-weights "${PHASE2_WEIGHTS}" --device "${DEVICE}" --n-warmup "${N_WARMUP}" --n-measure "${N_MEASURE}")
+        CMD+=("${PROJECT_ROOT}/experiments/e6/run_e6.py" --config "${CONFIG}" --phase3-weights "${PHASE3_WEIGHTS}" --device "${DEVICE}" --n-warmup "${N_WARMUP}" --n-measure "${N_MEASURE}")
         if [ -n "${OUTPUT}" ]; then
             CMD+=(--output "${OUTPUT}")
         fi
@@ -134,6 +136,9 @@ echo "[Experiment] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "[Experiment] config=${CONFIG}"
 echo "[Experiment] device=${DEVICE}"
 echo "[Experiment] enc_mode=${ENC_MODE}"
+echo "[Experiment] phase1_weights=${PHASE1_WEIGHTS}"
+echo "[Experiment] phase2_weights=${PHASE2_WEIGHTS}"
+echo "[Experiment] phase3_weights=${PHASE3_WEIGHTS}"
 if [ -n "${OUTPUT}" ]; then
     echo "[Experiment] output=${OUTPUT}"
 fi

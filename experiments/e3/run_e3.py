@@ -15,8 +15,9 @@ from experiments.e3.fair_compare import run_e3_all
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run E3 fair compare")
     parser.add_argument("--config", default="config/default.yaml", help="config file path")
-    parser.add_argument("--phase1-weights", required=True, help="phase1 checkpoint directory")
-    parser.add_argument("--phase2-weights", required=True, help="phase2 checkpoint directory")
+    parser.add_argument("--phase2-weights", required=True, help="Phase 2 checkpoint directory")
+    parser.add_argument("--phase3-weights", required=True, help="Phase 3 checkpoint directory")
+    parser.add_argument("--phase1-weights", dest="phase2_weights", help=argparse.SUPPRESS)
     parser.add_argument("--device", default="cuda:0", help="device, e.g. cuda:0 or cpu")
     parser.add_argument("--max-samples", type=int, default=-1, help="max samples per dataset")
     parser.add_argument("--output", default=None, help="output json path")
@@ -65,8 +66,8 @@ def main() -> None:
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
     run_e3_all(
         cfg=cfg,
-        phase1_weights=_resolve(args.phase1_weights),
-        phase2_weights=_resolve(args.phase2_weights),
+        phase1_weights=_resolve(args.phase2_weights),
+        phase2_weights=_resolve(args.phase3_weights),
         device=args.device,
         max_samples=args.max_samples,
         output_path=args.output,

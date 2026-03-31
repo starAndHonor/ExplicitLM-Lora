@@ -25,9 +25,9 @@ Example:
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
-  python experiments/e1/run_e1.py \
+python experiments/e1/run_e1.py \
   --config config/default.yaml \
-  --fusion-ckpt checkpoints/phase2_best
+  --weights checkpoints/phase2_best
 ```
 
 Current observed results:

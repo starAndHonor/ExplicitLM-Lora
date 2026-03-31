@@ -115,8 +115,9 @@ def _config_summary(data: dict[str, Any]) -> list[str]:
     items: list[tuple[str, str]] = []
     field_map = [
         ("weights", "Weights"),
-        ("phase1_weights", "Phase1 Weights"),
-        ("phase2_weights", "Phase2 Weights"),
+        ("phase1_weights", "Phase 2 Weights"),
+        ("phase2_weights", "Phase 3 Weights"),
+        ("phase3_weights", "Phase 3 Weights"),
         ("device", "Device"),
         ("num_gpus", "Num GPUs"),
         ("max_samples", "Max Samples"),

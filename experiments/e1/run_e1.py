@@ -16,11 +16,8 @@ from experiments.e2.common import setup_logging
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run E1 sanity check experiment")
     parser.add_argument("--config", default="config/default.yaml", help="config file path")
-    parser.add_argument(
-        "--fusion-ckpt",
-        default="checkpoints/phase2_best",
-        help="fusion checkpoint directory",
-    )
+    parser.add_argument("--weights", default="checkpoints/phase2_best", help="checkpoint directory")
+    parser.add_argument("--fusion-ckpt", dest="weights", help=argparse.SUPPRESS)
     parser.add_argument("--output", default=None, help="output json path")
     parser.add_argument("--max-samples", type=int, default=-1, help="max MedQA samples, -1 means full split")
     parser.add_argument(
@@ -69,9 +66,9 @@ def main() -> None:
     args = _parse_args()
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
     fusion_ckpt = (
-        str(Path(args.fusion_ckpt).resolve())
-        if Path(args.fusion_ckpt).is_absolute()
-        else str((PROJECT_ROOT / args.fusion_ckpt).resolve())
+        str(Path(args.weights).resolve())
+        if Path(args.weights).is_absolute()
+        else str((PROJECT_ROOT / args.weights).resolve())
     )
     run_e1_sanity_check(
         cfg=cfg,
@@ -84,4 +81,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

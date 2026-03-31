@@ -15,7 +15,8 @@ from experiments.e6.efficiency import run_e6_all
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run E6 inference efficiency benchmark")
     parser.add_argument("--config", default="config/default.yaml", help="config file path")
-    parser.add_argument("--phase2-weights", required=True, help="Phase 2/Phase 3 checkpoint directory")
+    parser.add_argument("--phase3-weights", required=True, help="Phase 3 checkpoint directory")
+    parser.add_argument("--phase2-weights", dest="phase3_weights", help=argparse.SUPPRESS)
     parser.add_argument("--device", default="cuda:0", help="single device, e.g. cuda:0 or cpu")
     parser.add_argument("--n-warmup", type=int, default=10, help="warmup samples")
     parser.add_argument("--n-measure", type=int, default=200, help="measured samples")
@@ -69,7 +70,7 @@ def main() -> None:
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
     run_e6_all(
         cfg=cfg,
-        phase2_weights=_resolve(args.phase2_weights) or args.phase2_weights,
+        phase2_weights=_resolve(args.phase3_weights) or args.phase3_weights,
         device=args.device,
         n_warmup=args.n_warmup,
         n_measure=args.n_measure,

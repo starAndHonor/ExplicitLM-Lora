@@ -33,7 +33,7 @@ E6 用来回答一个实际部署问题：
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e6/run_e6.py \
   --config config/default.yaml \
-  --phase2-weights checkpoints/phase3_best \
+  --phase3-weights checkpoints/phase3_best \
   --device cuda:0
 ```
 
@@ -43,7 +43,7 @@ python experiments/e6/run_e6.py \
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e6/run_e6.py \
   --config config/default.yaml \
-  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --phase3-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --device cuda:0
 ```
@@ -54,7 +54,7 @@ python experiments/e6/run_e6.py \
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e6/run_e6.py \
   --config config/default.yaml \
-  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --phase3-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --e5-result results/e5/e5_knowledge_analysis_p2p3_qwen3.json \
   --device cuda:0
