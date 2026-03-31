@@ -29,7 +29,8 @@ from models import ModifiedQwen  # noqa: E402
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Debug a single E2 example")
     parser.add_argument("--config", default="config/default.yaml")
-    parser.add_argument("--fusion-ckpt", default="checkpoints/phase2_best")
+    parser.add_argument("--weights", default="checkpoints/phase2_best")
+    parser.add_argument("--fusion-ckpt", dest="weights", help=argparse.SUPPRESS)
     parser.add_argument("--dataset", choices=["medqa", "arc", "mmlu"], required=True)
     parser.add_argument("--index", type=int, default=0, help="0-based example index")
     parser.add_argument("--device", default="cuda:0")
@@ -154,7 +155,7 @@ def main() -> None:
     )
 
     baseline_model, baseline_tokenizer = build_baseline_model(cfg, device=str(device))
-    fusion_model, fusion_tokenizer = build_injection_model(cfg, args.fusion_ckpt, device=str(device))
+    fusion_model, fusion_tokenizer = build_injection_model(cfg, args.weights, device=str(device))
 
     # Use the fusion tokenizer pad id to reflect the actual injection model path.
     knowledge_tensor = prepare_knowledge_tensor(

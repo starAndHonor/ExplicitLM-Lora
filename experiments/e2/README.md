@@ -25,7 +25,7 @@ Example:
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
   python experiments/e2/run_e2.py \
   --config config/default.yaml \
-  --phase2-ckpt checkpoints/phase2_best \
-  --phase3-ckpt checkpoints/phase3_best \
+  --phase2-weights checkpoints/phase2_best \
+  --phase3-weights checkpoints/phase3_best \
   --device cuda:0
 ```

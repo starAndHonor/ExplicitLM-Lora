@@ -15,8 +15,9 @@ from experiments.e5.analysis import build_e5_knowledge_all, run_e5_all
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run E5 knowledge analysis")
     parser.add_argument("--config", default="config/default.yaml", help="config file path")
-    parser.add_argument("--phase1-weights", default=None, help="Phase 1 checkpoint directory")
     parser.add_argument("--phase2-weights", default=None, help="Phase 2 checkpoint directory")
+    parser.add_argument("--phase3-weights", default=None, help="Phase 3 checkpoint directory")
+    parser.add_argument("--phase1-weights", dest="phase2_weights", help=argparse.SUPPRESS)
     parser.add_argument("--device", default="cuda:0", help="device, e.g. cuda:0 or cpu")
     parser.add_argument("--max-samples", type=int, default=-1, help="max samples per dataset")
     parser.add_argument("--output", default=None, help="output json path")
@@ -71,13 +72,13 @@ def main() -> None:
         build_e5_knowledge_all(cfg, max_samples=args.max_samples, rebuild=args.rebuild)
         return
 
-    if not args.phase1_weights or not args.phase2_weights:
-        raise ValueError("--phase1-weights and --phase2-weights are required unless --build-only is used")
+    if not args.phase2_weights or not args.phase3_weights:
+        raise ValueError("--phase2-weights and --phase3-weights are required unless --build-only is used")
 
     run_e5_all(
         cfg=cfg,
-        phase1_weights=_resolve(args.phase1_weights),
-        phase2_weights=_resolve(args.phase2_weights),
+        phase1_weights=_resolve(args.phase2_weights),
+        phase2_weights=_resolve(args.phase3_weights),
         device=args.device,
         max_samples=args.max_samples,
         output_path=args.output,

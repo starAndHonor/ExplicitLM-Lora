@@ -3,8 +3,8 @@
 #
 # 用法：
 #   ENC_MODE=qwen3 \
-#   PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
-#   PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#   PHASE2_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+#   PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #   bash scripts/run_e3_multik.sh
 
 set -euo pipefail
@@ -19,8 +19,8 @@ DEVICE="${DEVICE:-cuda:0}"
 ENC_MODE="${ENC_MODE:-trainable}"
 MAX_SAMPLES="${MAX_SAMPLES:--1}"
 K_LIST="${K_LIST:-32 64 128 256}"
-PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase2_best}"
-PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase3_best}"
+PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase2_best}"
+PHASE3_WEIGHTS="${PHASE3_WEIGHTS:-checkpoints/phase3_best}"
 DRY_RUN="${DRY_RUN:-0}"
 
 for K in ${K_LIST}; do
@@ -29,12 +29,12 @@ for K in ${K_LIST}; do
       conda run --no-capture-output -n ExplicitLLM
       python "${PROJECT_ROOT}/experiments/e3/run_e3.py"
       --config "${CONFIG}"
-      --phase1-weights "${PHASE1_WEIGHTS}"
       --phase2-weights "${PHASE2_WEIGHTS}"
+      --phase3-weights "${PHASE3_WEIGHTS}"
       --k "${K}"
       --device "${DEVICE}"
       --max-samples "${MAX_SAMPLES}"
-      --output "${PROJECT_ROOT}/results/e3/e3_fair_compare_k${K}_$(basename "${PHASE1_WEIGHTS%/}")__$(basename "${PHASE2_WEIGHTS%/}").json"
+      --output "${PROJECT_ROOT}/results/e3/e3_fair_compare_k${K}_$(basename "${PHASE2_WEIGHTS%/}")__$(basename "${PHASE3_WEIGHTS%/}").json"
     )
     if [ "${ENC_MODE}" = "qwen3" ]; then
         CMD+=(--override "model.knowledge_encoder_mode=qwen3")

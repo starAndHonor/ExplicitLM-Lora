@@ -87,7 +87,7 @@ checkpoints/p3_from_p2_qwen3_10ep
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e1/run_e1.py \
   --config config/default.yaml \
-  --fusion-ckpt checkpoints/p2_qwen3_10ep/phase2_best \
+  --weights checkpoints/p2_qwen3_10ep/phase2_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --output results/e1/e1_sanity_check_p2_qwen3_10ep_phase2_best.json
 ```
@@ -98,7 +98,7 @@ python experiments/e1/run_e1.py \
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e1/run_e1.py \
   --config config/default.yaml \
-  --fusion-ckpt checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --output results/e1/e1_sanity_check_p3_from_p2_qwen3_10ep_phase3_best.json
 ```
@@ -122,8 +122,8 @@ python experiments/e1/run_e1.py \
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e2/run_e2.py \
   --config config/default.yaml \
-  --phase2-ckpt checkpoints/p2_qwen3_10ep/phase2_best \
-  --phase3-ckpt checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --phase2-weights checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase3-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --device cuda:0 \
   --output results/e2/e2_cross_domain_p2_qwen3_10ep_phase2_best__p3_from_p2_qwen3_10ep_phase3_best.json
@@ -135,8 +135,8 @@ python experiments/e2/run_e2.py \
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e2/run_e2.py \
   --config config/default.yaml \
-  --phase2-ckpt checkpoints/phase2_best \
-  --phase3-ckpt checkpoints/phase3_best \
+  --phase2-weights checkpoints/phase2_best \
+  --phase3-weights checkpoints/phase3_best \
   --device cuda:0 \
   --output results/e2/e2_cross_domain_phase2_best__phase3_best.json
 ```
@@ -151,8 +151,8 @@ python experiments/e2/run_e2.py \
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e3/run_e3.py \
   --config config/default.yaml \
-  --phase1-weights checkpoints/p2_qwen3_10ep/phase2_best \
-  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --phase2-weights checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase3-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --device cuda:0
 ```
@@ -163,8 +163,8 @@ python experiments/e3/run_e3.py \
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e3/run_e3.py \
   --config config/default.yaml \
-  --phase1-weights checkpoints/phase2_best \
-  --phase2-weights checkpoints/phase3_best \
+  --phase2-weights checkpoints/phase2_best \
+  --phase3-weights checkpoints/phase3_best \
   --device cuda:0
 ```
 
@@ -208,8 +208,8 @@ bash scripts/run_experiment_auto.sh e3_multik
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e4/run_e4.py \
   --config config/default.yaml \
-  --phase1-weights checkpoints/p2_qwen3_10ep/phase2_best \
-  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --phase2-weights checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase3-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --device cuda:0
 ```
@@ -220,8 +220,8 @@ python experiments/e4/run_e4.py \
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e4/run_e4.py \
   --config config/default.yaml \
-  --phase1-weights checkpoints/phase2_best \
-  --phase2-weights checkpoints/phase3_best \
+  --phase2-weights checkpoints/phase2_best \
+  --phase3-weights checkpoints/phase3_best \
   --device cuda:0
 ```
 
@@ -233,8 +233,8 @@ python experiments/e4/run_e4.py \
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e5/run_e5.py \
   --config config/default.yaml \
-  --phase1-weights checkpoints/p2_qwen3_10ep/phase2_best \
-  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --phase2-weights checkpoints/p2_qwen3_10ep/phase2_best \
+  --phase3-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --device cuda:0 \
   --output results/e5/e5_knowledge_analysis_p2p3_qwen3.json
@@ -246,8 +246,8 @@ python experiments/e5/run_e5.py \
 CUDA_VISIBLE_DEVICES=2,3 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e5/run_e5.py \
   --config config/default.yaml \
-  --phase1-weights checkpoints/phase2_best \
-  --phase2-weights checkpoints/phase3_best \
+  --phase2-weights checkpoints/phase2_best \
+  --phase3-weights checkpoints/phase3_best \
   --device cuda:0
 ```
 
@@ -268,7 +268,7 @@ python experiments/e5/run_e5.py \
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e6/run_e6.py \
   --config config/default.yaml \
-  --phase2-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+  --phase3-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --override model.knowledge_encoder_mode=qwen3 \
   --e5-result results/e5/e5_knowledge_analysis_p2p3_qwen3.json \
   --device cuda:0
@@ -280,7 +280,7 @@ python experiments/e6/run_e6.py \
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
 python experiments/e6/run_e6.py \
   --config config/default.yaml \
-  --phase2-weights checkpoints/phase3_best \
+  --phase3-weights checkpoints/phase3_best \
   --device cuda:0
 ```
 
@@ -296,9 +296,8 @@ python experiments/e6/run_e6.py \
 
 ```bash
 ENC_MODE=qwen3 \
-FUSION_CKPT=checkpoints/p2_qwen3_10ep/phase2_best \
-PHASE1_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
-PHASE2_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+PHASE2_WEIGHTS=checkpoints/p2_qwen3_10ep/phase2_best \
+PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 EXPERIMENTS="e3 e5 e6" \
 bash scripts/run_experiment_suite.sh
 ```
