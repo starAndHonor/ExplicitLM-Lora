@@ -19,11 +19,14 @@
 #   FROM_PHASE2     Phase 2 最优 checkpoint 目录（默认 checkpoints/phase2_best；
 #                   设为 none 可跳过 Phase 2 初始化，直接做 Phase 1 -> Phase 3）
 #   FROM_PHASE1     可选：Phase 1 checkpoint 目录（启用 frozen router 检索知识）
+#   FROM_DENSE_INDEX 可选：DenseRetriever 索引路径（启用 dense 检索知识）
 #   CONFIG          配置文件路径（默认 config/default.yaml）
-#   ENC_MODE        知识编码模式（默认 trainable，可选 qwen3）
+#   ENC_MODE        知识编码模式（默认 qwen3，可选 trainable）
 #   FROM_TAG        Phase 2 实验标签，用于自动生成 Phase 3 输出目录
 #                   （默认取 FROM_PHASE2 目录名）
-#   KNOWLEDGE_SOURCE 知识来源（默认 static，可选 phase1_router）
+#   KNOWLEDGE_SOURCE 知识来源（默认 static，可选 phase1_router/dense_retriever）
+#   DATA_ROOT       数据根目录（默认 ${PROJECT_ROOT}/data，可指向共享数据目录）
+#   MAIN_PROCESS_PORT accelerate 主进程端口（默认 29502）
 
 set -euo pipefail
 
@@ -36,14 +39,17 @@ export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
+DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/data}"
 FROM_PHASE2="${FROM_PHASE2:-${PROJECT_ROOT}/checkpoints/phase2_best}"
 FROM_PHASE1="${FROM_PHASE1:-}"
+FROM_DENSE_INDEX="${FROM_DENSE_INDEX:-}"
 ENV_FILE="${PROJECT_ROOT}/.env"
-ENC_MODE="${ENC_MODE:-trainable}"
+ENC_MODE="${ENC_MODE:-qwen3}"
 FROM_TAG="${FROM_TAG:-$(basename "${FROM_PHASE2}")}"
 CKP_NAME="p3_from_${FROM_TAG}"
 CHECKPOINT_PATH="checkpoints/${CKP_NAME}"
 KNOWLEDGE_SOURCE="${KNOWLEDGE_SOURCE:-static}"
+MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29502}"
 
 # ── 项目环境变量（如 SwanLab API Key） ──
 if [ -f "${ENV_FILE}" ]; then
@@ -58,14 +64,19 @@ fi
 
 echo "[Phase3SFT] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, num_processes=${NUM_GPUS}"
 echo "[Phase3SFT] Config: ${CONFIG}"
+echo "[Phase3SFT] Data root: ${DATA_ROOT}"
 echo "[Phase3SFT] Phase 2 Checkpoint: ${FROM_PHASE2}"
 if [ -n "${FROM_PHASE1}" ]; then
     echo "[Phase3SFT] Phase 1 Checkpoint: ${FROM_PHASE1}"
+fi
+if [ -n "${FROM_DENSE_INDEX}" ]; then
+    echo "[Phase3SFT] Dense Index: ${FROM_DENSE_INDEX}"
 fi
 echo "[Phase3SFT] Project: ${PROJECT_ROOT}"
 echo "[Phase3SFT] Encoder mode: ${ENC_MODE}"
 echo "[Phase3SFT] Checkpoint name: ${CKP_NAME}"
 echo "[Phase3SFT] Knowledge source: ${KNOWLEDGE_SOURCE}"
+echo "[Phase3SFT] Main process port: ${MAIN_PROCESS_PORT}"
 
 # ── 检查 Phase 2 Checkpoint ──
 if [ "${FROM_PHASE2}" != "none" ] && [ ! -d "${FROM_PHASE2}" ]; then
@@ -75,7 +86,7 @@ if [ "${FROM_PHASE2}" != "none" ] && [ ! -d "${FROM_PHASE2}" ]; then
 fi
 
 # ── 检查 MedQA 数据 ──
-MEDQA_DIR="${PROJECT_ROOT}/data/medqa/hf_dataset"
+MEDQA_DIR="${DATA_ROOT}/medqa/hf_dataset"
 if [ ! -d "${MEDQA_DIR}" ]; then
     echo "[ERROR] MedQA HF dataset 目录不存在: ${MEDQA_DIR}"
     echo "[INFO]  请将 MedQA HuggingFace dataset 放入 data/medqa/hf_dataset/"
@@ -83,12 +94,12 @@ if [ ! -d "${MEDQA_DIR}" ]; then
 fi
 echo "[Phase3SFT] MedQA dataset: ${MEDQA_DIR}"
 
-TRAIN_KM="${PROJECT_ROOT}/data/medqa_knowledge_train.jsonl"
+TRAIN_KM="${DATA_ROOT}/medqa_knowledge_train.jsonl"
 if [ ! -f "${TRAIN_KM}" ]; then
     echo "[WARN] 训练知识映射不存在: ${TRAIN_KM}（将使用空知识兜底）"
 fi
 
-VAL_KM="${PROJECT_ROOT}/data/medqa_knowledge_validation.jsonl"
+VAL_KM="${DATA_ROOT}/medqa_knowledge_validation.jsonl"
 if [ ! -f "${VAL_KM}" ]; then
     echo "[WARN] 验证知识映射不存在: ${VAL_KM}（将使用空知识兜底）"
 fi
@@ -113,11 +124,12 @@ CMD=(
     conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launch
     --num_processes "${NUM_GPUS}"
     --mixed_precision bf16
-    --main_process_port 29502
+    --main_process_port "${MAIN_PROCESS_PORT}"
     "${PROJECT_ROOT}/main.py"
     --config "${CONFIG}"
     --device cuda
     --override model.knowledge_encoder_mode="${ENC_MODE}"
+    --override paths.data_dir="${DATA_ROOT}"
     --override paths.checkpoint_dir="${CHECKPOINT_PATH}"
 )
 if [ "$#" -gt 0 ]; then
@@ -126,5 +138,8 @@ fi
 CMD+=(train --phase 3 --from-phase2 "${FROM_PHASE2}" --knowledge-source "${KNOWLEDGE_SOURCE}")
 if [ -n "${FROM_PHASE1}" ]; then
     CMD+=(--from-phase1 "${FROM_PHASE1}")
+fi
+if [ -n "${FROM_DENSE_INDEX}" ]; then
+    CMD+=(--from-dense-index "${FROM_DENSE_INDEX}")
 fi
 "${CMD[@]}"

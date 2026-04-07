@@ -91,7 +91,7 @@ def build_injection_model(
 
     encoder = KnowledgeEncoder(
         base_model=base_model,
-        encoder_depth=cfg.model.encoder_depth,
+        encoder_depth=cfg.model.fusion_encoder_depth,
         hidden_dim=cfg.model.hidden_dim,
         mode=cfg.model.knowledge_encoder_mode,
     )

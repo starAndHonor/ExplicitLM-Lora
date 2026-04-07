@@ -947,7 +947,7 @@ def train_phase1(cfg: "Config", device_str: str = "cpu") -> None:
 
     base_model = load_base_model(cfg.paths.model_dir, bf16=cfg.train.bf16)
     encoder = KnowledgeEncoder(
-        base_model, cfg.model.encoder_depth, cfg.model.hidden_dim
+        base_model, cfg.model.retrieval_encoder_depth, cfg.model.hidden_dim
     )
     encoder.requires_grad_(False)  # Phase 1 完全冻结 encoder
     encoder = encoder.to(device)
