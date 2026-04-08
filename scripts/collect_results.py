@@ -85,6 +85,8 @@ def _model_overview() -> list[str]:
         "- `injection_method`: `{}`".format(model.injection_method),
         "- `injection_layers`: `{}`".format(model.injection_layers),
         "- `encoder_depth`: `{}`".format(model.encoder_depth),
+        "- `retrieval_encoder_depth`: `{}`".format(getattr(model, "retrieval_encoder_depth", model.encoder_depth)),
+        "- `fusion_encoder_depth`: `{}`".format(getattr(model, "fusion_encoder_depth", model.encoder_depth)),
         "- `knowledge_encoder_mode`: `{}`".format(model.knowledge_encoder_mode),
         "- `fusion_length`: `{}`".format(model.fusion_length),
         "- `anchor_length`: `{}`".format(model.anchor_length),
@@ -609,11 +611,74 @@ def _summarize_e6(path: Path, data: dict[str, Any]) -> Section:
     return Section("E6", lines)
 
 
+def _summarize_e7(path: Path, data: dict[str, Any]) -> Section:
+    lines = [
+        "**Config**",
+        "",
+        f"- `Training-free Weights`: `{_ckpt_label(data.get('training_free_weights'))}`",
+        f"- `Device`: `{data.get('device', '-')}`",
+        f"- `Query Mode`: `{data.get('query_mode', '-')}`",
+        f"- `Max Samples`: `{data.get('max_samples', '-')}`",
+        f"- `Elapsed Sec`: `{_num(data.get('elapsed_sec'), 2)}`",
+        f"- `File`: `{_rel(path)}`",
+        "",
+    ]
+    rows: list[list[str]] = []
+    for ds in ("medqa", "arc", "mmlu"):
+        ds_title = "MedQA" if ds == "medqa" else "ARC" if ds == "arc" else "MMLU"
+        ds_data = data.get(ds, {})
+        summary = data.get("summary", {}).get(ds, {})
+        rows.append([
+            ds_title,
+            _pct(ds_data.get("B0_qwen3_base", {}).get("acc")),
+            _pct(ds_data.get("TF_dense_p3_infer", {}).get("acc")),
+            _pct(ds_data.get("RAG_dense", {}).get("acc")),
+            _signed_pct(summary.get("TF_minus_B0")),
+            _signed_pct(summary.get("RAG_minus_B0")),
+            str(summary.get("best_group", "-")),
+        ])
+    lines.extend(
+        _table(
+            ["数据集", "B0", "TF Dense→P3", "Dense RAG", "TF-B0", "RAG-B0", "Best"],
+            rows,
+        )
+    )
+    return Section("E7", lines)
+
+
+def _summarize_e7_retrieval(path: Path, data: dict[str, Any]) -> Section:
+    query_mode = "-"
+    rows: list[list[str]] = []
+    for ds in ("medqa", "arc", "mmlu"):
+        ds_title = "MedQA" if ds == "medqa" else "ARC" if ds == "arc" else "MMLU"
+        ds_data = data.get(ds, {})
+        results = ds_data.get("results", {})
+        if results:
+            query_mode = next(iter(results.keys()), query_mode)
+        result = results.get(query_mode, {}) if query_mode in results else (next(iter(results.values())) if results else {})
+        rows.append([
+            ds_title,
+            str(result.get("tested", "-")),
+            _pct(result.get("top1_exact_rate")),
+            _pct(result.get("topk_hit_rate")),
+            str(result.get("top_k", "-")),
+        ])
+    lines = [
+        "**Config**",
+        "",
+        f"- `Query Mode`: `{query_mode}`",
+        f"- `File`: `{_rel(path)}`",
+        "",
+    ]
+    lines.extend(_table(["数据集", "Tested", "Top1", "Top16", "k"], rows))
+    return Section("E7", lines)
+
+
 def _detect_experiment(path: Path, data: dict[str, Any]) -> str | None:
     parent = path.parent.name.lower()
     name = path.name.lower()
     exp_field = str(data.get("experiment", "")).lower()
-    for token in ("e1", "e2", "e3", "e4", "e5", "e6"):
+    for token in ("e1", "e2", "e3", "e4", "e5", "e6", "e7"):
         if token == parent or name.startswith(f"{token}_") or exp_field.startswith(token):
             return token.upper()
     return None
@@ -637,11 +702,16 @@ def _make_section(path: Path) -> Section | None:
         return _summarize_e5(path, data)
     if exp == "E6":
         return _summarize_e6(path, data)
+    if exp == "E7":
+        if "summary" in data and "training_free_weights" in data:
+            return _summarize_e7(path, data)
+        if all(isinstance(data.get(ds), dict) and "results" in data.get(ds, {}) for ds in ("medqa", "arc", "mmlu")):
+            return _summarize_e7_retrieval(path, data)
     return None
 
 
 def build_summary() -> str:
-    sections_by_exp: dict[str, list[Section]] = {f"E{i}": [] for i in range(1, 7)}
+    sections_by_exp: dict[str, list[Section]] = {f"E{i}": [] for i in range(1, 8)}
     all_paths = _scan_results()
 
     e1_paths = [path for path in all_paths if path.parent.name.lower() == "e1" or path.name.lower().startswith("e1_")]
@@ -671,7 +741,7 @@ def build_summary() -> str:
         *_model_overview(),
     ]
 
-    for exp in (f"E{i}" for i in range(1, 7)):
+    for exp in (f"E{i}" for i in range(1, 8)):
         sections = sections_by_exp[exp]
         lines.append(f"## {exp}")
         lines.append("")

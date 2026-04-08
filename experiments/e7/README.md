@@ -1,15 +1,13 @@
-# E7 Multi-Benchmark Compare
+# E7 Dense Benchmark
 
-E7 用来在三个 benchmark 上统一比较 4 组方法：
+当前 `E7` 使用 dense retrieval，在三个 benchmark 上统一比较 3 组方法：
 
 - `B0_qwen3_base`
   `Qwen3-0.6B` 直接做多选题打分
-- `S1_p1_p2_p3`
-  方案一：`Phase1 -> Phase2 -> Phase3`
-- `S2_p1_p3_infer`
-  方案二：`Phase1 -> Phase3` 冻结推理
-- `S3_p2oracle_p1_p3`
-  方案三：`Phase2(oracle) -> Phase1 -> Phase3`
+- `TF_dense_p3_infer`
+  dense 检索 + `Phase3` 注入推理
+- `RAG_dense`
+  dense 检索 + 直接拼接知识文本的 RAG 基线
 
 评测数据集：
 
@@ -17,74 +15,65 @@ E7 用来在三个 benchmark 上统一比较 4 组方法：
 - `ARC-Challenge`
 - `MMLU`
 
-说明：
-
-- `S1/S2/S3` 都使用同一个 `Phase1` router 做在线检索。
-- 检索 query 使用和下游打分一致的完整 prompt：
-  `Question + A/B/C/D + Answer:`
-
 ## 运行
 
-推荐直接用脚本：
+如果三份 overlay index 已经准备好，直接运行：
 
 ```bash
-PHASE1_WEIGHTS=checkpoints/phase1_best \
-SCHEME1_WEIGHTS=checkpoints/scheme1_final/phase3_best \
-SCHEME2_WEIGHTS=checkpoints/phase3_best \
-SCHEME3_WEIGHTS=checkpoints/scheme3_final/phase3_best \
-bash scripts/run_e7.sh
+DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
+DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_original_text_flat_r24_qwen3.pt \
+DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_original_text_flat_r24_qwen3.pt \
+TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+bash experiments/e7/run.sh
 ```
 
-默认情况下，`scripts/run_e7.sh` 会使用：
+如果希望自动完成：
 
-- `ENC_MODE=qwen3`
+1. 构建 `1M FineWeb base`
+2. 构建三个数据集的 overlay index
+3. 先做 retrieval precheck
+4. 再跑最终 E7
 
-也就是默认使用 `Qwen` 嵌入，而不是可训练知识编码器。
-
-如果你想显式切回可训练模式：
+可以直接运行：
 
 ```bash
-ENC_MODE=trainable \
-PHASE1_WEIGHTS=checkpoints/phase1_best \
-SCHEME1_WEIGHTS=checkpoints/scheme1_final/phase3_best \
-SCHEME2_WEIGHTS=checkpoints/phase3_best \
-SCHEME3_WEIGHTS=checkpoints/scheme3_final/phase3_best \
-bash scripts/run_e7.sh
+GPU_IDS=2 \
+TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+bash experiments/e7/run_dense_full.sh
 ```
 
-等价的 Python 命令：
+默认会同时跑两套 anchor 版本：
+
+- `original_text`
+- `k256`
+
+如果只想跑其中一个版本，例如 `k256`：
+
+```bash
+GPU_IDS=2 \
+ANCHOR_VARIANTS=k256 \
+TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+bash experiments/e7/run_dense_full.sh
+```
+
+等价的 Python 主入口：
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
   python experiments/e7/run_e7.py \
   --config config/default.yaml \
-  --phase1-weights checkpoints/phase1_best \
-  --scheme1-weights checkpoints/scheme1_final/phase3_best \
-  --scheme2-weights checkpoints/phase3_best \
-  --scheme3-weights checkpoints/scheme3_final/phase3_best \
-  --device cuda:0
-```
-
-如果只想先做小样本 smoke test：
-
-```bash
-CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ExplicitLLM \
-  python experiments/e7/run_e7.py \
-  --config config/default.yaml \
-  --phase1-weights checkpoints/phase1_best \
-  --scheme1-weights checkpoints/scheme1_final/phase3_best \
-  --scheme2-weights checkpoints/phase3_best \
-  --scheme3-weights checkpoints/scheme3_final/phase3_best \
+  --dense-index-medqa checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
+  --dense-index-arc checkpoints/dense_fineweb_arc_overlay_original_text_flat_r24_qwen3.pt \
+  --dense-index-mmlu checkpoints/dense_fineweb_mmlu_overlay_original_text_flat_r24_qwen3.pt \
+  --training-free-weights checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
   --device cuda:0 \
-  --max-samples 20
+  --query-mode question_only \
+  --override model.knowledge_encoder_mode=qwen3
 ```
 
-如果你直接走 Python 入口、而不是脚本，并且想评测 `qwen3` 模式 checkpoint，需要补充：
+结果默认写到 `results/e7/`，例如：
 
-```bash
---override model.knowledge_encoder_mode=qwen3
-```
-
-结果默认写到：
-
-- [results/e7/e7_benchmark_compare.json](/home/undergraduate/zcy/Explicit-Lora/results/e7/e7_benchmark_compare.json)
+- `results/e7/e7_dense_original_text_phase3_best.json`
+- `results/e7/e7_dense_k256_phase3_best.json`
+- `results/e7/e7_dense_retrieval_precheck_original_text.json`
+- `results/e7/e7_dense_retrieval_precheck_k256.json`

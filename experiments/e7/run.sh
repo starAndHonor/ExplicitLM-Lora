@@ -19,8 +19,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/_experiment_common.sh"
+source "${PROJECT_ROOT}/scripts/_experiment_common.sh"
 
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 GPU_IDS="${GPU_IDS:-6}"

@@ -12,8 +12,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/_experiment_common.sh"
+source "${PROJECT_ROOT}/scripts/_experiment_common.sh"
 
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 GPU_IDS="${GPU_IDS:-2}"
@@ -182,7 +183,7 @@ for variant in "${VARIANT_LIST[@]}"; do
     if [ "${RUN_RETRIEVAL_EVAL}" = "1" ]; then
         run_cmd \
             conda run --no-capture-output -n ExplicitLLM \
-            python "${PROJECT_ROOT}/scripts/eval_e7_dense_retrieval.py" \
+            python "${PROJECT_ROOT}/experiments/e7/eval_dense_retrieval.py" \
             --config "${CONFIG}" \
             --dense-index-medqa "${MEDQA_INDEX}" \
             --dense-index-arc "${ARC_INDEX}" \
@@ -207,5 +208,5 @@ for variant in "${VARIANT_LIST[@]}"; do
         DENSE_INDEX_MMLU="${MMLU_INDEX}" \
         TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}" \
         OUTPUT="${PROJECT_ROOT}/results/e7/e7_dense_${variant}_$(basename "${TRAINING_FREE_WEIGHTS}").json" \
-        bash "${PROJECT_ROOT}/scripts/run_e7.sh"
+        bash "${PROJECT_ROOT}/experiments/e7/run.sh"
 done
