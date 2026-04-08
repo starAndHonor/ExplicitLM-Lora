@@ -86,6 +86,9 @@ class FeatureAdapter(nn.Module):
         """
         assert x.dim() in (2, 3), f"输入维度必须为 2 或 3，实际: {x.dim()}"
         is_3d = x.dim() == 3
+        norm_dtype = self.input_norm.weight.dtype
+        if x.dtype != norm_dtype:
+            x = x.to(dtype=norm_dtype)
 
         # Phase 1: Batch Centering — 动态减去批次均值，消除冻结 embedding 的模式偏差
         if is_3d:
@@ -115,7 +118,7 @@ class FeatureAdapter(nn.Module):
                     f"mask 形状 {mask.shape} 与 x 前两维 {x.shape[:2]} 不匹配"
                 )
                 # True 位置参与平均，False 位置（padding）不参与
-                mask_float = mask.unsqueeze(-1).float()  # [B, S, 1]
+                mask_float = mask.unsqueeze(-1).to(dtype=x.dtype)  # [B, S, 1]
                 x = (x * mask_float).sum(dim=1) / mask_float.sum(dim=1).clamp(min=1.0)
             else:
                 x = x.mean(dim=1)  # [B, S, adapter_dim] → [B, adapter_dim]

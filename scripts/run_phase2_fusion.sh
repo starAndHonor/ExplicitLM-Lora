@@ -10,11 +10,12 @@
 #   NUM_GPUS        使用 GPU 数量（默认 2）
 #   GPU_IDS         CUDA_VISIBLE_DEVICES（默认 6,7）
 #   CONFIG          配置文件路径（默认 config/default.yaml）
-#   ENC_MODE        知识编码模式（默认 trainable，可选 qwen3）
+#   ENC_MODE        知识编码模式（默认 qwen3，可选 trainable）
 #   EPOCHS          Phase 2 训练轮数（默认 10）
 #   TAG             额外命名标签（可选，如 norm）
 #   FROM_PHASE1     可选：Phase 1 checkpoint 目录（启用 frozen router 检索知识）
 #   KNOWLEDGE_SOURCE 知识来源（默认 oracle，可选 phase1_router）
+#   MAIN_PROCESS_PORT accelerate 主进程端口（默认 29501）
 
 set -euo pipefail
 
@@ -28,11 +29,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 ENV_FILE="${PROJECT_ROOT}/.env"
-ENC_MODE="${ENC_MODE:-trainable}"
+ENC_MODE="${ENC_MODE:-qwen3}"
 EPOCHS="${EPOCHS:-10}"
 TAG="${TAG:-}"
 FROM_PHASE1="${FROM_PHASE1:-}"
 KNOWLEDGE_SOURCE="${KNOWLEDGE_SOURCE:-oracle}"
+MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29501}"
 
 CKP_NAME="p2_${ENC_MODE}_${EPOCHS}ep"
 if [ -n "${TAG}" ]; then
@@ -59,6 +61,7 @@ echo "[Phase2Fusion] Encoder mode: ${ENC_MODE}"
 echo "[Phase2Fusion] Epochs: ${EPOCHS}"
 echo "[Phase2Fusion] Checkpoint name: ${CKP_NAME}"
 echo "[Phase2Fusion] Knowledge source: ${KNOWLEDGE_SOURCE}"
+echo "[Phase2Fusion] Main process port: ${MAIN_PROCESS_PORT}"
 if [ -n "${FROM_PHASE1}" ]; then
     echo "[Phase2Fusion] Phase 1 Checkpoint: ${FROM_PHASE1}"
 fi
@@ -101,7 +104,7 @@ CMD=(
     conda run --no-capture-output -n ExplicitLLM python -m accelerate.commands.launch
     --num_processes "${NUM_GPUS}"
     --mixed_precision bf16
-    --main_process_port 29501
+    --main_process_port "${MAIN_PROCESS_PORT}"
     "${PROJECT_ROOT}/main.py"
     --config "${CONFIG}"
     --device cuda

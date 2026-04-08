@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -39,6 +39,7 @@ from config import Config
 from models.injection_modules import AttentionInjection
 from models.modified_model import ModifiedQwen
 from models.qwen_wrapper import KnowledgeEncoder, load_base_model
+from training.dense_retriever import DenseRetriever
 from training.phase1_retriever import Phase1Retriever
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ class MedQASFTDataset(Dataset):
         self,
         hf_dataset_split,
         knowledge_map: Dict[str, List[int]],
+        gold_knowledge_map: Optional[Dict[str, List[int]]],
         tokenizer: AutoTokenizer,
         max_seq_length: int,
         fusion_length: int,
@@ -129,6 +131,7 @@ class MedQASFTDataset(Dataset):
     ) -> None:
         self.data = hf_dataset_split
         self.knowledge_map = knowledge_map
+        self.gold_knowledge_map = gold_knowledge_map if gold_knowledge_map is not None else knowledge_map
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.fusion_length = fusion_length
@@ -217,6 +220,7 @@ class MedQASFTDataset(Dataset):
         # Phase 7: 知识查表（question[:200].strip() 作为 key）
         key = question[:200].strip()
         raw_k_ids: List[int] = self.knowledge_map.get(key, self.default_knowledge)
+        raw_gold_k_ids: List[int] = self.gold_knowledge_map.get(key, self.default_knowledge)
 
         # 截断 / 填充到 fusion_length
         k_ids = raw_k_ids[: self.fusion_length]
@@ -226,11 +230,17 @@ class MedQASFTDataset(Dataset):
         knowledge_ids = torch.tensor(k_ids, dtype=torch.long)
         knowledge_mask = (knowledge_ids != self.pad_token_id).long()
 
+        gold_k_ids = raw_gold_k_ids[: self.fusion_length]
+        if len(gold_k_ids) < self.fusion_length:
+            gold_k_ids = gold_k_ids + [self.pad_token_id] * (self.fusion_length - len(gold_k_ids))
+        gold_knowledge_ids = torch.tensor(gold_k_ids, dtype=torch.long)
+
         return {
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": attention_mask,
             "knowledge_ids": knowledge_ids,
+            "gold_knowledge_ids": gold_knowledge_ids,
             "knowledge_mask": knowledge_mask,
             "router_input_ids": router_input_ids,
             "router_attention_mask": router_attention_mask,
@@ -247,7 +257,7 @@ def _evaluate_val_loss(
     accelerator: Accelerator,
     modified_qwen: nn.Module,
     val_loader: DataLoader,
-    retriever: Optional[Phase1Retriever] = None,
+    retriever: Optional[Union[Phase1Retriever, DenseRetriever]] = None,
 ) -> float:
     """
     计算验证集平均 loss（用于早停判断）。
@@ -288,6 +298,61 @@ def _evaluate_val_loss(
 
     modified_qwen.train()
     return val_loss
+
+
+@torch.no_grad()
+def _evaluate_retrieval_metrics(
+    accelerator: Accelerator,
+    val_loader: DataLoader,
+    retriever: Optional[Union[Phase1Retriever, DenseRetriever]],
+    top_k: int = 16,
+) -> Dict[str, float]:
+    """
+    计算验证集检索正确率，用于 SwanLab 追踪。
+
+    返回：
+        retrieval_top1_exact: top1 与 gold 完全一致比例
+        retrieval_topk_hit: gold 是否出现在 top-k 中（仅 dense retriever）
+        retrieval_samples: 参与统计样本数
+    """
+    if retriever is None:
+        return {}
+
+    top1_correct = torch.tensor(0.0, device=accelerator.device)
+    topk_hit = torch.tensor(0.0, device=accelerator.device)
+    total = torch.tensor(0.0, device=accelerator.device)
+    supports_topk = isinstance(retriever, DenseRetriever)
+
+    for batch in val_loader:
+        gold = batch["gold_knowledge_ids"]
+        pred_top1 = retriever.retrieve_from_tokens(
+            batch["router_input_ids"],
+            batch["router_attention_mask"],
+        )
+        top1_correct += (pred_top1 == gold).all(dim=1).float().sum()
+        total += torch.tensor(float(gold.shape[0]), device=accelerator.device)
+
+        if supports_topk:
+            search = retriever.search_from_tokens(
+                batch["router_input_ids"],
+                batch["router_attention_mask"],
+                top_k=top_k,
+            )
+            cand = search.fusion_ids.to(gold.device)
+            hit = (cand == gold.unsqueeze(1)).all(dim=2).any(dim=1).float().sum()
+            topk_hit += hit
+
+    top1_correct = accelerator.reduce(top1_correct, reduction="sum")
+    topk_hit = accelerator.reduce(topk_hit, reduction="sum")
+    total = accelerator.reduce(total, reduction="sum")
+
+    metrics: Dict[str, float] = {
+        "retrieval_top1_exact": (top1_correct / total.clamp(min=1)).item(),
+        "retrieval_samples": total.item(),
+    }
+    if supports_topk:
+        metrics[f"retrieval_top{top_k}_hit"] = (topk_hit / total.clamp(min=1)).item()
+    return metrics
 
 
 # ─────────────────────────────────────────────
@@ -383,7 +448,9 @@ def _init_swanlab(cfg: Config, accelerator: Accelerator) -> None:
                 "patience": cfg.train.patience,
                 "max_seq_length": cfg.data.phase3_max_seq_length,
                 "fusion_length": cfg.model.fusion_length,
-                "encoder_depth": cfg.model.encoder_depth,
+                "retrieval_encoder_depth": cfg.model.retrieval_encoder_depth,
+                "fusion_encoder_depth": cfg.model.fusion_encoder_depth,
+                "knowledge_encoder_mode": cfg.model.knowledge_encoder_mode,
                 "injection_layers": cfg.model.injection_layers,
             },
         }
@@ -440,16 +507,22 @@ def _build_modified_qwen_phase3(
     model_path = os.environ.get("MODEL_PATH", cfg.paths.model_dir)
 
     logger.info("[Phase3SFT] 加载基础模型: %s", model_path)
+    base_t0 = time.time()
     base_model = load_base_model(model_path, bf16=cfg.train.bf16)
+    logger.info("[Phase3SFT] 基础模型加载完成，用时 %.1fs", time.time() - base_t0)
+
+    tok_t0 = time.time()
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    logger.info("[Phase3SFT] tokenizer 加载完成，用时 %.1fs", time.time() - tok_t0)
 
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # 知识编码器：trainable 模式解冻，与 Phase 2 保持一致；qwen3 模式保持冻结
+    enc_t0 = time.time()
     encoder = KnowledgeEncoder(
         base_model=base_model,
-        encoder_depth=cfg.model.encoder_depth,
+        encoder_depth=cfg.model.fusion_encoder_depth,
         hidden_dim=cfg.model.hidden_dim,
         mode=cfg.model.knowledge_encoder_mode,
     )
@@ -457,6 +530,7 @@ def _build_modified_qwen_phase3(
         logger.info("[Phase3SFT] KnowledgeEncoder 使用 qwen3 模式（复用 Qwen encoder，不训练）")
     else:
         encoder.unfreeze_layers()
+    logger.info("[Phase3SFT] KnowledgeEncoder 构建完成，用时 %.1fs", time.time() - enc_t0)
 
     # 注入模块
     if cfg.model.injection_method != "attention":
@@ -475,6 +549,10 @@ def _build_modified_qwen_phase3(
         injection_layers=cfg.model.injection_layers,
         pad_token_id=tokenizer.pad_token_id,
     )
+    logger.info(
+        "[Phase3SFT] ModifiedQwen 构建完成 | injection_layers=%s",
+        cfg.model.injection_layers,
+    )
 
     # 从 Phase 2 checkpoint 加载权重
     if phase2_ckpt is not None:
@@ -490,6 +568,8 @@ def _build_modified_qwen_phase3(
         inj_path = ckpt_dir / "injection_modules.pt"
         enc_layers_path = ckpt_dir / "encoder_layers.pt"
         enc_norm_path = ckpt_dir / "encoder_norm.pt"
+        ckpt_t0 = time.time()
+        logger.info("[Phase3SFT] 开始从 Phase2 checkpoint 加载权重: %s", ckpt_dir)
 
         if inj_path.exists():
             modified_qwen.injection_modules.load_state_dict(_load_tensor("injection_modules.pt"))
@@ -516,6 +596,7 @@ def _build_modified_qwen_phase3(
             logger.info("[Phase3SFT] encoder_norm 从 %s 加载", ckpt_dir)
         else:
             logger.warning("[Phase3SFT] encoder_norm.pt 不存在，使用随机初始化！")
+        logger.info("[Phase3SFT] Phase2 checkpoint 权重加载完成，用时 %.1fs", time.time() - ckpt_t0)
     else:
         logger.warning(
             "[Phase3SFT] 未提供 phase2_ckpt，使用随机初始化（建议先运行 Phase 2）"
@@ -540,6 +621,7 @@ def train_phase3(
     device: str,
     phase2_ckpt: Optional[str] = None,
     phase1_ckpt: Optional[str] = None,
+    dense_index_path: Optional[str] = None,
     knowledge_source: Optional[str] = None,
 ) -> None:
     """
@@ -571,14 +653,14 @@ def train_phase3(
     _init_swanlab(cfg, accelerator)
 
     knowledge_source = knowledge_source or "static"
-    if knowledge_source not in {"static", "phase1_router"}:
+    if knowledge_source not in {"static", "phase1_router", "dense_retriever"}:
         raise ValueError(
-            f"Phase 3 knowledge_source 仅支持 static/phase1_router，实际: {knowledge_source}"
+            f"Phase 3 knowledge_source 仅支持 static/phase1_router/dense_retriever，实际: {knowledge_source}"
         )
 
     # ── §7.2  构建模型 ──
     modified_qwen, tokenizer = _build_modified_qwen_phase3(cfg, phase2_ckpt)
-    retriever: Optional[Phase1Retriever] = None
+    retriever: Optional[Union[Phase1Retriever, DenseRetriever]] = None
     if knowledge_source == "phase1_router":
         if not phase1_ckpt:
             raise ValueError("Phase 3 使用 phase1_router 时必须提供 --from-phase1")
@@ -589,6 +671,22 @@ def train_phase3(
             tokenizer=tokenizer,
         )
         logger.info("[Phase3SFT] 已启用 Phase 1 frozen retrieval: %s", phase1_ckpt)
+    elif knowledge_source == "dense_retriever":
+        if not dense_index_path:
+            raise ValueError("Phase 3 使用 dense_retriever 时必须提供 --from-dense-index")
+        retriever_t0 = time.time()
+        logger.info("[Phase3SFT] 开始初始化 DenseRetriever: %s", dense_index_path)
+        retriever = DenseRetriever(
+            cfg=cfg,
+            index_path=dense_index_path,
+            device=accelerator.device,
+            tokenizer=tokenizer,
+        )
+        logger.info(
+            "[Phase3SFT] 已启用 Dense retrieval: %s | 初始化用时 %.1fs",
+            dense_index_path,
+            time.time() - retriever_t0,
+        )
 
     # ── §7.3  加载数据集 ──
     dataset_dir = str(Path(cfg.paths.data_dir) / "medqa" / "hf_dataset")
@@ -597,21 +695,32 @@ def train_phase3(
             f"MedQA HF dataset 目录不存在: {dataset_dir}\n"
             f"请先将 MedQA 数据放入 data/medqa/hf_dataset/。"
         )
+    ds_t0 = time.time()
+    logger.info("[Phase3SFT] 开始加载 MedQA dataset: %s", dataset_dir)
     hf_dataset = load_from_disk(dataset_dir)
     logger.info(
-        "[Phase3SFT] 加载 MedQA dataset: train=%d, test=%d",
+        "[Phase3SFT] 加载 MedQA dataset 完成: train=%d, test=%d | 用时 %.1fs",
         len(hf_dataset["train"]),
         len(hf_dataset["test"]),
+        time.time() - ds_t0,
     )
 
     # 知识映射（train + validation）
     train_knowledge_map: Dict[str, List[int]] = {}
     val_knowledge_map: Dict[str, List[int]] = {}
+    train_gold_map: Dict[str, List[int]] = {}
+    val_gold_map: Dict[str, List[int]] = {}
     if knowledge_source == "static":
         train_km_path = str(Path(cfg.paths.data_dir) / "medqa_knowledge_train.jsonl")
         val_km_path = str(Path(cfg.paths.data_dir) / "medqa_knowledge_validation.jsonl")
         train_knowledge_map = _load_knowledge_map(train_km_path)
         val_knowledge_map = _load_knowledge_map(val_km_path)
+        train_gold_map = train_knowledge_map
+        val_gold_map = val_knowledge_map
+    else:
+        train_km_path = str(Path(cfg.paths.data_dir) / "medqa_knowledge_train.jsonl")
+        train_gold_map = _load_knowledge_map(train_km_path)
+        val_gold_map = _load_knowledge_map(cfg.eval.medqa_knowledge_map)
 
     # ── §7.4  构建 Dataset & DataLoader ──
     pad_id = tokenizer.pad_token_id
@@ -619,6 +728,7 @@ def train_phase3(
     train_dataset = MedQASFTDataset(
         hf_dataset_split=hf_dataset["train"],
         knowledge_map=train_knowledge_map,
+        gold_knowledge_map=train_gold_map,
         tokenizer=tokenizer,
         max_seq_length=cfg.data.phase3_max_seq_length,
         fusion_length=cfg.model.fusion_length,
@@ -629,6 +739,7 @@ def train_phase3(
     val_dataset = MedQASFTDataset(
         hf_dataset_split=hf_dataset["test"],
         knowledge_map=val_knowledge_map,
+        gold_knowledge_map=val_gold_map,
         tokenizer=tokenizer,
         max_seq_length=cfg.data.phase3_max_seq_length,
         fusion_length=cfg.model.fusion_length,
@@ -650,6 +761,13 @@ def train_phase3(
         shuffle=False,
         num_workers=cfg.data.num_workers,
         pin_memory=True,
+    )
+    logger.info(
+        "[Phase3SFT] DataLoader 构建完成 | train_batches=%d | val_batches=%d | batch_size=%d | num_workers=%d",
+        len(train_loader),
+        len(val_loader),
+        cfg.train.phase3_batch_size,
+        cfg.data.num_workers,
     )
 
     # ── §7.5  优化器 & 调度器 ──
@@ -759,21 +877,40 @@ def train_phase3(
             val_loader,
             retriever=retriever,
         )
+        retrieval_metrics = _evaluate_retrieval_metrics(
+            accelerator,
+            val_loader,
+            retriever=retriever,
+            top_k=16,
+        )
         epoch_time = time.time() - epoch_start
 
+        retrieval_log = ""
+        if retrieval_metrics:
+            retrieval_log = "  retrieval_top1=%.4f" % retrieval_metrics["retrieval_top1_exact"]
+            if "retrieval_top16_hit" in retrieval_metrics:
+                retrieval_log += "  retrieval_top16=%.4f" % retrieval_metrics["retrieval_top16_hit"]
+
         logger.info(
-            "[Phase3SFT] Epoch %d 完成: train_loss=%.4f  val_loss=%.4f  耗时=%.1fs",
+            "[Phase3SFT] Epoch %d 完成: train_loss=%.4f  val_loss=%.4f%s  耗时=%.1fs",
             epoch,
             epoch_train_loss,
             epoch_val_loss,
+            retrieval_log,
             epoch_time,
         )
+        epoch_metrics = {
+            "epoch/train_loss": epoch_train_loss,
+            "epoch/val_loss": epoch_val_loss,
+            "epoch/time_s": epoch_time,
+        }
+        if retrieval_metrics:
+            epoch_metrics["val/retrieval_top1_exact"] = retrieval_metrics["retrieval_top1_exact"]
+            if "retrieval_top16_hit" in retrieval_metrics:
+                epoch_metrics["val/retrieval_top16_hit"] = retrieval_metrics["retrieval_top16_hit"]
+            epoch_metrics["val/retrieval_samples"] = retrieval_metrics["retrieval_samples"]
         _log_swanlab(
-            {
-                "epoch/train_loss": epoch_train_loss,
-                "epoch/val_loss": epoch_val_loss,
-                "epoch/time_s": epoch_time,
-            },
+            epoch_metrics,
             step=epoch,
             accelerator=accelerator,
             cfg=cfg,

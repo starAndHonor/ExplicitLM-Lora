@@ -93,10 +93,13 @@ def _cmd_train(cfg: Any, args: argparse.Namespace) -> None:
     device = getattr(args, "device", "cpu")
     phase1_ckpt = getattr(args, "from_phase1", None)
     phase2_ckpt = getattr(args, "from_phase2", None)
+    dense_index_path = getattr(args, "from_dense_index", None)
     if isinstance(phase1_ckpt, str) and phase1_ckpt.lower() in {"", "none", "null"}:
         phase1_ckpt = None
     if isinstance(phase2_ckpt, str) and phase2_ckpt.lower() in {"", "none", "null"}:
         phase2_ckpt = None
+    if isinstance(dense_index_path, str) and dense_index_path.lower() in {"", "none", "null"}:
+        dense_index_path = None
     knowledge_source = getattr(args, "knowledge_source", None)
     if args.phase == 1:
         from training.phase1_router import train_phase1
@@ -119,6 +122,7 @@ def _cmd_train(cfg: Any, args: argparse.Namespace) -> None:
             device,
             phase2_ckpt=phase2_ckpt,
             phase1_ckpt=phase1_ckpt,
+            dense_index_path=dense_index_path,
             knowledge_source=knowledge_source,
         )
     else:
@@ -221,13 +225,20 @@ def main() -> None:
         help="Phase 2/3 可选：Phase 1 最优 checkpoint 目录（含 router.pt/store.pt）",
     )
     train_parser.add_argument(
+        "--from-dense-index",
+        type=str,
+        default=None,
+        dest="from_dense_index",
+        help="Phase 3 可选：DenseRetriever 索引文件路径（.pt）",
+    )
+    train_parser.add_argument(
         "--knowledge-source",
         type=str,
         default=None,
-        choices=["oracle", "static", "phase1_router"],
+        choices=["oracle", "static", "phase1_router", "dense_retriever"],
         help=(
             "Phase 2/3 知识来源："
-            "phase2 用 oracle/phase1_router，phase3 用 static/phase1_router"
+            "phase2 用 oracle/phase1_router，phase3 用 static/phase1_router/dense_retriever"
         ),
     )
     subparsers.add_parser("eval", help="评测入口")

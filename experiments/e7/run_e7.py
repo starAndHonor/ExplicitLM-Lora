@@ -13,15 +13,25 @@ from experiments.e7.comparison import run_e7_all
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run E7 multi-benchmark comparison")
+    parser = argparse.ArgumentParser(description="Run E7 dense benchmark comparison")
     parser.add_argument("--config", default="config/default.yaml", help="config file path")
-    parser.add_argument("--phase1-weights", required=True, help="Phase1 router checkpoint directory")
-    parser.add_argument("--scheme1-weights", required=True, help="Scheme1 final fusion checkpoint directory")
-    parser.add_argument("--scheme2-weights", required=True, help="Scheme2 fusion checkpoint directory")
-    parser.add_argument("--scheme3-weights", required=True, help="Scheme3 final fusion checkpoint directory")
+    parser.add_argument("--dense-index-medqa", required=True, help="Dense retriever index for MedQA")
+    parser.add_argument("--dense-index-arc", required=True, help="Dense retriever index for ARC")
+    parser.add_argument("--dense-index-mmlu", required=True, help="Dense retriever index for MMLU")
+    parser.add_argument(
+        "--training-free-weights",
+        required=True,
+        help="Fusion checkpoint directory used with dense retrieval",
+    )
     parser.add_argument("--device", default="cuda:0", help="device, e.g. cuda:0 or cpu")
     parser.add_argument("--max-samples", type=int, default=-1, help="max samples per benchmark")
     parser.add_argument("--output", default=None, help="output json path")
+    parser.add_argument(
+        "--query-mode",
+        choices=["question_only", "question_choices"],
+        default="question_only",
+        help="Dense retrieval query formulation",
+    )
     parser.add_argument("--override", nargs="?", action="append", help="config overrides")
     return parser.parse_args()
 
@@ -67,16 +77,18 @@ def main() -> None:
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
     run_e7_all(
         cfg=cfg,
-        phase1_weights=_resolve(args.phase1_weights),
-        scheme1_weights=_resolve(args.scheme1_weights),
-        scheme2_weights=_resolve(args.scheme2_weights),
-        scheme3_weights=_resolve(args.scheme3_weights),
+        dense_indices={
+            "medqa": _resolve(args.dense_index_medqa),
+            "arc": _resolve(args.dense_index_arc),
+            "mmlu": _resolve(args.dense_index_mmlu),
+        },
+        training_free_weights=_resolve(args.training_free_weights),
         device=args.device,
         max_samples=args.max_samples,
         output_path=args.output,
+        query_mode=args.query_mode,
     )
 
 
 if __name__ == "__main__":
     main()
-

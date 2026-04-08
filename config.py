@@ -36,7 +36,8 @@ class ModelConfig:
         num_layers: 模型 Transformer 层数（Qwen3-0.6B 为 28）
         injection_method: 知识注入方式，"attention" | "concat" | "gated"
         injection_layers: 注入模块所在层索引列表
-        encoder_depth: 知识编码器使用的 Qwen3 前 N 层
+        retrieval_encoder_depth: 检索侧编码器使用的 Qwen3 前 N 层
+        fusion_encoder_depth: 融合/注入侧编码器使用的 Qwen3 前 N 层
         knowledge_encoder_mode: 知识编码器模式
             - "trainable": 当前主线模式，显式 mask + 独立 norm + 可联合训练
             - "qwen3": 复用 Qwen3 encoder helper 语义，不显式使用知识 mask，不训练 encoder
@@ -49,10 +50,20 @@ class ModelConfig:
     num_layers: int
     injection_method: str
     injection_layers: List[int]
-    encoder_depth: int
+    retrieval_encoder_depth: int
+    fusion_encoder_depth: int
     knowledge_encoder_mode: str
     fusion_length: int
     anchor_length: int
+
+    @property
+    def encoder_depth(self) -> int:
+        """
+        兼容旧代码：默认返回融合侧深度。
+
+        老逻辑里唯一的 encoder_depth 更接近当前的融合/注入侧深度。
+        """
+        return self.fusion_encoder_depth
 
 
 @dataclass
@@ -386,8 +397,15 @@ def _dict_to_config(config_dict: Dict[str, Any]) -> Config:
                 f"YAML 缺少顶层 section: '{section}'，已有: {list(config_dict.keys())}"
             )
 
+    model_dict = dict(config_dict["model"])
+    legacy_depth = model_dict.pop("encoder_depth", None)
+    if "retrieval_encoder_depth" not in model_dict and legacy_depth is not None:
+        model_dict["retrieval_encoder_depth"] = legacy_depth
+    if "fusion_encoder_depth" not in model_dict and legacy_depth is not None:
+        model_dict["fusion_encoder_depth"] = legacy_depth
+
     try:
-        model_cfg = ModelConfig(**config_dict["model"])
+        model_cfg = ModelConfig(**model_dict)
     except TypeError as e:
         raise TypeError(f"ModelConfig 构造失败（检查 YAML model 段）: {e}") from e
 

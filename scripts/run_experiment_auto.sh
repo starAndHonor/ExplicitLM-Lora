@@ -12,6 +12,13 @@
 #     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment_auto.sh e3_multik
 #   DRY_RUN=1 bash scripts/run_experiment_auto.sh e6
+#   DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
+#     DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_original_text_flat_r24_qwen3.pt \
+#     DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_original_text_flat_r24_qwen3.pt \
+#     TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash scripts/run_experiment_auto.sh e7
+#   TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash scripts/run_experiment_auto.sh e7_full
 
 set -euo pipefail
 
@@ -20,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_experiment_common.sh"
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: bash scripts/run_experiment_auto.sh <e1|e2|e3|e3_multik|e4|e5|e6> [extra args ...]"
+    echo "Usage: bash scripts/run_experiment_auto.sh <e1|e2|e3|e3_multik|e4|e5|e6|e7|e7_full> [extra args ...]"
     exit 1
 fi
 
@@ -30,6 +37,7 @@ shift
 PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase1_best}"
 PHASE2_WEIGHTS="${PHASE2_WEIGHTS:-checkpoints/phase2_best}"
 PHASE3_WEIGHTS="${PHASE3_WEIGHTS:-checkpoints/phase3_best}"
+TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS:-${PHASE3_WEIGHTS}}"
 E1_WEIGHTS="${E1_WEIGHTS:-${PHASE2_WEIGHTS}}"
 E1_PHASE2_OUTPUT="${E1_PHASE2_OUTPUT:-}"
 E1_PHASE3_OUTPUT="${E1_PHASE3_OUTPUT:-}"
@@ -62,6 +70,12 @@ if [ -z "${OUTPUT}" ]; then
             ;;
         e6)
             OUTPUT="results/e6/e6_inference_efficiency_$(exp_ckpt_tag "${PHASE3_WEIGHTS}").json"
+            ;;
+        e7)
+            OUTPUT="results/e7/e7_dense_$(exp_ckpt_tag "${TRAINING_FREE_WEIGHTS}").json"
+            ;;
+        e7_full)
+            OUTPUT=""
             ;;
         *)
             echo "[ExperimentAuto] Unknown experiment: ${EXPERIMENT}"
@@ -101,4 +115,5 @@ E5_RESULT="${E5_RESULT}" \
 PHASE1_WEIGHTS="${PHASE1_WEIGHTS}" \
 PHASE2_WEIGHTS="${PHASE2_WEIGHTS}" \
 PHASE3_WEIGHTS="${PHASE3_WEIGHTS}" \
+TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}" \
 bash "${SCRIPT_DIR}/run_experiment.sh" "${EXPERIMENT}" "$@"

@@ -15,6 +15,13 @@
 #     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment.sh e3
 #   DRY_RUN=1 bash scripts/run_experiment.sh e6
+#   DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
+#     DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_original_text_flat_r24_qwen3.pt \
+#     DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_original_text_flat_r24_qwen3.pt \
+#     TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash scripts/run_experiment.sh e7
+#   TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash scripts/run_experiment.sh e7_full
 
 set -euo pipefail
 
@@ -23,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_experiment_common.sh"
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: bash scripts/run_experiment.sh <e1|e2|e3|e3_multik|e4|e5|e6> [extra args ...]"
+    echo "Usage: bash scripts/run_experiment.sh <e1|e2|e3|e3_multik|e4|e5|e6|e7|e7_full> [extra args ...]"
     exit 1
 fi
 
@@ -34,7 +41,7 @@ CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
 NUM_GPUS="${NUM_GPUS:-2}"
 GPU_IDS="${GPU_IDS:-6,7}"
 DEVICE="${DEVICE:-cuda:0}"
-ENC_MODE="${ENC_MODE:-trainable}"
+ENC_MODE="${ENC_MODE:-qwen3}"
 OUTPUT="${OUTPUT:-}"
 E1_PHASE2_OUTPUT="${E1_PHASE2_OUTPUT:-}"
 E1_PHASE3_OUTPUT="${E1_PHASE3_OUTPUT:-}"
@@ -43,6 +50,19 @@ N_WARMUP="${N_WARMUP:-10}"
 N_MEASURE="${N_MEASURE:-200}"
 E3_RESULT="${E3_RESULT:-}"
 E5_RESULT="${E5_RESULT:-}"
+TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS:-${PHASE3_WEIGHTS}}"
+DENSE_INDEX_MEDQA="${DENSE_INDEX_MEDQA:-}"
+DENSE_INDEX_ARC="${DENSE_INDEX_ARC:-}"
+DENSE_INDEX_MMLU="${DENSE_INDEX_MMLU:-}"
+QUERY_MODE="${QUERY_MODE:-question_only}"
+DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/data}"
+PARQUET_DIR="${PARQUET_DIR:-${DATA_ROOT}/compressed/v2}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_ROOT}/checkpoints}"
+ANCHOR_VARIANTS="${ANCHOR_VARIANTS:-original_text,k256}"
+BUILD_BASE="${BUILD_BASE:-1}"
+BUILD_OVERLAYS="${BUILD_OVERLAYS:-1}"
+RUN_RETRIEVAL_EVAL="${RUN_RETRIEVAL_EVAL:-1}"
+SKIP_E7="${SKIP_E7:-0}"
 BUILD_ONLY="${BUILD_ONLY:-0}"
 BUILD_MISSING="${BUILD_MISSING:-0}"
 REBUILD="${REBUILD:-0}"
@@ -66,6 +86,37 @@ case "${EXPERIMENT}" in
         export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
         ;;
 esac
+
+if [ "${EXPERIMENT}" = "e7_full" ]; then
+    echo "[Experiment] name=${EXPERIMENT}"
+    echo "[Experiment] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+    echo "[Experiment] config=${CONFIG}"
+    echo "[Experiment] device=${DEVICE}"
+    echo "[Experiment] enc_mode=${ENC_MODE}"
+    echo "[Experiment] data_root=${DATA_ROOT}"
+    echo "[Experiment] parquet_dir=${PARQUET_DIR}"
+    echo "[Experiment] checkpoint_dir=${CHECKPOINT_DIR}"
+    echo "[Experiment] training_free_weights=${TRAINING_FREE_WEIGHTS}"
+    echo "[Experiment] query_mode=${QUERY_MODE}"
+    CONFIG="${CONFIG}" \
+    GPU_IDS="${GPU_IDS}" \
+    DEVICE="${DEVICE}" \
+    ENC_MODE="${ENC_MODE}" \
+    DATA_ROOT="${DATA_ROOT}" \
+    PARQUET_DIR="${PARQUET_DIR}" \
+    CHECKPOINT_DIR="${CHECKPOINT_DIR}" \
+    TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}" \
+    QUERY_MODE="${QUERY_MODE}" \
+    MAX_SAMPLES="${MAX_SAMPLES}" \
+    ANCHOR_VARIANTS="${ANCHOR_VARIANTS}" \
+    BUILD_BASE="${BUILD_BASE}" \
+    BUILD_OVERLAYS="${BUILD_OVERLAYS}" \
+    RUN_RETRIEVAL_EVAL="${RUN_RETRIEVAL_EVAL}" \
+    SKIP_E7="${SKIP_E7}" \
+    DRY_RUN="${DRY_RUN}" \
+    bash "${PROJECT_ROOT}/experiments/e7/run_dense_full.sh" "$@"
+    exit 0
+fi
 
 if [ "${EXPERIMENT}" = "e3_multik" ] || [ "${EXPERIMENT}" = "e3k" ]; then
     echo "[Experiment] name=${EXPERIMENT}"
@@ -193,6 +244,29 @@ case "${EXPERIMENT}" in
             CMD+=(--e5-result "${E5_RESULT}")
         fi
         ;;
+    e7)
+        if [ -z "${DENSE_INDEX_MEDQA}" ] || [ -z "${DENSE_INDEX_ARC}" ] || [ -z "${DENSE_INDEX_MMLU}" ]; then
+            echo "[Experiment] ERROR: e7 需要设置 DENSE_INDEX_MEDQA / DENSE_INDEX_ARC / DENSE_INDEX_MMLU"
+            exit 1
+        fi
+        CMD=(
+            env
+            CONFIG="${CONFIG}"
+            GPU_IDS="${GPU_IDS}"
+            DEVICE="${DEVICE}"
+            ENC_MODE="${ENC_MODE}"
+            MAX_SAMPLES="${MAX_SAMPLES}"
+            DENSE_INDEX_MEDQA="${DENSE_INDEX_MEDQA}"
+            DENSE_INDEX_ARC="${DENSE_INDEX_ARC}"
+            DENSE_INDEX_MMLU="${DENSE_INDEX_MMLU}"
+            TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}"
+            QUERY_MODE="${QUERY_MODE}"
+        )
+        if [ -n "${OUTPUT}" ]; then
+            CMD+=(OUTPUT="${OUTPUT}")
+        fi
+        CMD+=(bash "${PROJECT_ROOT}/experiments/e7/run.sh")
+        ;;
     *)
         echo "[Experiment] Unknown experiment: ${EXPERIMENT}"
         exit 1
@@ -210,6 +284,10 @@ echo "[Experiment] enc_mode=${ENC_MODE}"
 echo "[Experiment] phase1_weights=${PHASE1_WEIGHTS}"
 echo "[Experiment] phase2_weights=${PHASE2_WEIGHTS}"
 echo "[Experiment] phase3_weights=${PHASE3_WEIGHTS}"
+if [ "${EXPERIMENT}" = "e7" ] || [ "${EXPERIMENT}" = "e7_full" ]; then
+    echo "[Experiment] training_free_weights=${TRAINING_FREE_WEIGHTS}"
+    echo "[Experiment] query_mode=${QUERY_MODE}"
+fi
 if [ -n "${OUTPUT}" ]; then
     echo "[Experiment] output=${OUTPUT}"
 fi

@@ -40,7 +40,7 @@ class Phase1Retriever:
 
         self.encoder = KnowledgeEncoder(
             base_model=base_model,
-            encoder_depth=cfg.model.encoder_depth,
+            encoder_depth=cfg.model.retrieval_encoder_depth,
             hidden_dim=cfg.model.hidden_dim,
             mode=cfg.model.knowledge_encoder_mode,
         )
@@ -97,4 +97,3 @@ class Phase1Retriever:
     def retrieve_from_texts(self, texts: Sequence[str]) -> torch.Tensor:
         query_ids, query_mask = self.tokenize_texts(texts)
         return self.retrieve_from_tokens(query_ids, query_mask)
-

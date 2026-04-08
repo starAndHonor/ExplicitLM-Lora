@@ -282,7 +282,7 @@ def _build_modified_qwen(cfg: Config, device: str) -> Tuple[ModifiedQwen, AutoTo
     # Phase 2: 构建知识编码器；trainable 模式解冻前 N 层，qwen3 模式保持冻结
     encoder = KnowledgeEncoder(
         base_model=base_model,
-        encoder_depth=cfg.model.encoder_depth,
+        encoder_depth=cfg.model.fusion_encoder_depth,
         hidden_dim=cfg.model.hidden_dim,
         mode=cfg.model.knowledge_encoder_mode,
     )
@@ -292,7 +292,7 @@ def _build_modified_qwen(cfg: Config, device: str) -> Tuple[ModifiedQwen, AutoTo
         encoder.unfreeze_layers()
         logger.info(
             "[Phase2Fusion] KnowledgeEncoder 已解冻前 %d 层（联合训练模式）",
-            cfg.model.encoder_depth,
+            cfg.model.fusion_encoder_depth,
         )
 
     # Phase 3: 构建注入模块（AttentionInjection × N）

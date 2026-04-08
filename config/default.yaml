@@ -13,12 +13,14 @@ model:
   injection_method: "attention"
   # 注入模块所在层索引（从 0 起，每 6 层一个注入点）
   injection_layers: [6, 12, 18, 24]
-  # 知识编码器使用 Qwen3 前 N 层
-  encoder_depth: 6
+  # 检索侧编码器使用 Qwen3 前 N 层（Dense/Router retrieval）
+  retrieval_encoder_depth: 24
+  # 融合/注入侧编码器使用 Qwen3 前 N 层（Phase2/Phase3）
+  fusion_encoder_depth: 6
   # 知识编码器模式: "trainable" | "qwen3"
-  # trainable = 当前主线（显式 mask + 独立 norm + 可联合训练）
-  # qwen3 = 直接复用 Qwen3 前 N 层与原始 norm，不显式使用知识 mask，不训练 encoder
-  knowledge_encoder_mode: "trainable"
+  # trainable = 显式 mask + 独立 norm + 可联合训练
+  # qwen3 = 当前默认模式，直接复用 Qwen3 前 N 层与原始 norm，不显式使用知识 mask，不训练 encoder
+  knowledge_encoder_mode: "qwen3"
   # Fusion Bank 每条知识的 token 数（LLMLingua 压缩后）
   fusion_length: 64
   # Anchor Bank 每条知识的 token 数（原文截断，用于路由匹配）

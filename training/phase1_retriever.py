@@ -65,7 +65,7 @@ class Phase1Retriever:
         base_model = load_base_model(model_path, bf16=use_bf16)
         self.encoder = KnowledgeEncoder(
             base_model=base_model,
-            encoder_depth=cfg.model.encoder_depth,
+            encoder_depth=cfg.model.retrieval_encoder_depth,
             hidden_dim=cfg.model.hidden_dim,
             mode=cfg.model.knowledge_encoder_mode,
         )
