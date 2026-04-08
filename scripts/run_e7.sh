@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 运行 E7：Qwen3-0.6B / Qwen3-0.6B+RAG / 三种方案，在 MedQA / ARC / MMLU 上统一对比
+# 运行 E7（Dense 版）：B0 / Dense training-free / Dense RAG 在 MedQA / ARC / MMLU 上统一对比
 #
 # 用法：
-#   PHASE1_WEIGHTS=checkpoints/phase1_best \
-#   SCHEME1_WEIGHTS=checkpoints/scheme1_final/phase3_best \
-#   SCHEME2_WEIGHTS=checkpoints/phase3_best \
-#   SCHEME3_WEIGHTS=checkpoints/scheme3_final/phase3_best \
+#   DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_flat_r24_qwen3.pt \
+#   DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_flat_r24_qwen3.pt \
+#   DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_flat_r24_qwen3.pt \
+#   TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #   bash scripts/run_e7.sh
 #
 #   GPU_IDS=2 \
@@ -29,29 +29,36 @@ ENC_MODE="${ENC_MODE:-qwen3}"
 MAX_SAMPLES="${MAX_SAMPLES:--1}"
 DRY_RUN="${DRY_RUN:-0}"
 
-PHASE1_WEIGHTS="${PHASE1_WEIGHTS:-checkpoints/phase1_best}"
-SCHEME1_WEIGHTS="${SCHEME1_WEIGHTS:-checkpoints/scheme1_final/phase3_best}"
-SCHEME2_WEIGHTS="${SCHEME2_WEIGHTS:-checkpoints/phase3_best}"
-SCHEME3_WEIGHTS="${SCHEME3_WEIGHTS:-checkpoints/scheme3_final/phase3_best}"
+DENSE_INDEX_MEDQA="${DENSE_INDEX_MEDQA:-}"
+DENSE_INDEX_ARC="${DENSE_INDEX_ARC:-}"
+DENSE_INDEX_MMLU="${DENSE_INDEX_MMLU:-}"
+TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS:-checkpoints/p3_from_p2_qwen3_10ep/phase3_best}"
+QUERY_MODE="${QUERY_MODE:-question_only}"
+
+if [ -z "${DENSE_INDEX_MEDQA}" ] || [ -z "${DENSE_INDEX_ARC}" ] || [ -z "${DENSE_INDEX_MMLU}" ]; then
+    echo "[E7] ERROR: DENSE_INDEX_MEDQA / DENSE_INDEX_ARC / DENSE_INDEX_MMLU 必须全部设置"
+    exit 1
+fi
 
 exp_load_env
 export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 
 if [ -z "${OUTPUT:-}" ]; then
-    OUTPUT="${PROJECT_ROOT}/results/e7/e7_$(exp_ckpt_tag "${SCHEME1_WEIGHTS}")__$(exp_ckpt_tag "${SCHEME2_WEIGHTS}")__$(exp_ckpt_tag "${SCHEME3_WEIGHTS}").json"
+    OUTPUT="${PROJECT_ROOT}/results/e7/e7_dense_$(exp_ckpt_tag "${TRAINING_FREE_WEIGHTS}").json"
 fi
 
 declare -a CMD=(
     conda run --no-capture-output -n ExplicitLLM
     python "${PROJECT_ROOT}/experiments/e7/run_e7.py"
     --config "${CONFIG}"
-    --phase1-weights "${PHASE1_WEIGHTS}"
-    --scheme1-weights "${SCHEME1_WEIGHTS}"
-    --scheme2-weights "${SCHEME2_WEIGHTS}"
-    --scheme3-weights "${SCHEME3_WEIGHTS}"
+    --dense-index-medqa "${DENSE_INDEX_MEDQA}"
+    --dense-index-arc "${DENSE_INDEX_ARC}"
+    --dense-index-mmlu "${DENSE_INDEX_MMLU}"
+    --training-free-weights "${TRAINING_FREE_WEIGHTS}"
     --device "${DEVICE}"
     --max-samples "${MAX_SAMPLES}"
     --output "${OUTPUT}"
+    --query-mode "${QUERY_MODE}"
 )
 
 if [ "${ENC_MODE}" = "qwen3" ]; then
@@ -66,10 +73,11 @@ echo "[E7] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "[E7] config=${CONFIG}"
 echo "[E7] device=${DEVICE}"
 echo "[E7] enc_mode=${ENC_MODE}"
-echo "[E7] phase1_weights=${PHASE1_WEIGHTS}"
-echo "[E7] scheme1_weights=${SCHEME1_WEIGHTS}"
-echo "[E7] scheme2_weights=${SCHEME2_WEIGHTS}"
-echo "[E7] scheme3_weights=${SCHEME3_WEIGHTS}"
+echo "[E7] dense_index_medqa=${DENSE_INDEX_MEDQA}"
+echo "[E7] dense_index_arc=${DENSE_INDEX_ARC}"
+echo "[E7] dense_index_mmlu=${DENSE_INDEX_MMLU}"
+echo "[E7] training_free_weights=${TRAINING_FREE_WEIGHTS}"
+echo "[E7] query_mode=${QUERY_MODE}"
 echo "[E7] output=${OUTPUT}"
 exp_print_cmd "${CMD[@]}"
 

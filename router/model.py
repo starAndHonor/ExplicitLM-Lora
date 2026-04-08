@@ -196,6 +196,7 @@ class MemoryRouter(nn.Module):
 
             # KnowledgeEncoder 上下文化（Qwen3 前 encoder_depth 层 + 双向注意力）
             cand_enc = self.encoder.forward(flat_ids, flat_mask)  # [B*C, K_a, D]
+            cand_enc = cand_enc.to(dtype=self.adapter.proj.weight.dtype)
 
             # FeatureAdapter mean pooling + 投影 → [B*C, adapter_dim]
             # adapter 3D 路径：[B*C, K_a, D] → masked mean pool → [B*C, adapter_dim]

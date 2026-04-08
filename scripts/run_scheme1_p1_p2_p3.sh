@@ -7,7 +7,7 @@
 #
 # 环境变量：
 #   PHASE1_CKPT    Phase 1 checkpoint 目录（默认 checkpoints/phase1_best）
-#   ENC_MODE       知识编码模式（默认 trainable）
+#   ENC_MODE       知识编码模式（默认 qwen3）
 #   EPOCHS         Phase 2 训练轮数（默认 10）
 #   TAG            Phase 2 标签（默认 router）
 #   SWANLAB_PROJECT_P2  Phase 2 SwanLab 项目名（默认 explicit-lora-p2）
@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 PHASE1_CKPT="${PHASE1_CKPT:-${PROJECT_ROOT}/checkpoints/phase1_best}"
-ENC_MODE="${ENC_MODE:-trainable}"
+ENC_MODE="${ENC_MODE:-qwen3}"
 EPOCHS="${EPOCHS:-10}"
 TAG="${TAG:-router}"
 NUM_GPUS="${NUM_GPUS:-2}"

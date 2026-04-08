@@ -13,12 +13,11 @@ from experiments.e2.common import (
     PROJECT_ROOT,
     build_baseline_model,
     build_injection_model,
-    load_knowledge_map,
     setup_logging,
 )
 from experiments.e2.scoring import build_multiple_choice_prompt, score_choices_injection
-from experiments.e3.evaluator import eval_baseline, eval_rag_compressed
-from experiments.e7.phase1_retrieval import Phase1Retriever
+from experiments.e3.evaluator import eval_baseline
+from training.dense_retriever import DenseRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -44,22 +43,23 @@ def _load_datasets(max_samples: int) -> Dict[str, List[Dict[str, Any]]]:
     }
 
 
-def _load_knowledge_maps(cfg: Config) -> Dict[str, Dict[str, List[int]]]:
-    return {
-        "medqa": load_knowledge_map(str(PROJECT_ROOT / cfg.eval.medqa_knowledge_map)),
-        "arc": load_knowledge_map(str(PROJECT_ROOT / cfg.eval.arc_knowledge_map)),
-        "mmlu": load_knowledge_map(str(PROJECT_ROOT / cfg.eval.mmlu_knowledge_map)),
-    }
+def _build_dense_query(row: Dict[str, Any], query_mode: str) -> str:
+    if query_mode == "question_only":
+        return row["question"]
+    if query_mode == "question_choices":
+        return build_multiple_choice_prompt(row["question"], row["choices"])
+    raise ValueError(f"unsupported query_mode: {query_mode}")
 
 
-def eval_phase1_router_fusion(
+def eval_dense_fusion(
     model: torch.nn.Module,
     tokenizer: Any,
-    retriever: Phase1Retriever,
+    retriever: DenseRetriever,
     rows: List[Dict[str, Any]],
     device: torch.device,
     dataset_name: str,
     group_name: str,
+    query_mode: str,
     show_progress: bool = True,
 ) -> Dict[str, Any]:
     from tqdm.auto import tqdm
@@ -77,7 +77,8 @@ def eval_phase1_router_fusion(
     with torch.no_grad():
         for i, row in enumerate(iterator, start=1):
             prompt = build_multiple_choice_prompt(row["question"], row["choices"])
-            knowledge_ids = retriever.retrieve_from_texts([prompt])
+            retrieval_query = _build_dense_query(row, query_mode)
+            knowledge_ids = retriever.retrieve_from_texts([retrieval_query])
             context_ids = tokenizer.encode(prompt, add_special_tokens=False)
             pred = score_choices_injection(model, tokenizer, context_ids, knowledge_ids, device)
             if pred == row["label"]:
@@ -88,16 +89,57 @@ def eval_phase1_router_fusion(
     return {"acc": acc, "correct": correct, "total": total}
 
 
+def eval_dense_rag(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    retriever: DenseRetriever,
+    rows: List[Dict[str, Any]],
+    device: torch.device,
+    dataset_name: str,
+    query_mode: str,
+    show_progress: bool = True,
+) -> Dict[str, Any]:
+    from tqdm.auto import tqdm
+
+    total = len(rows)
+    correct = 0
+    iterator = tqdm(
+        rows,
+        total=total,
+        desc=f"📌 {dataset_name.upper()} / RAG",
+        leave=True,
+        disable=not show_progress,
+    )
+    logger.info("📌 %s | Dense RAG | start | samples=%d", dataset_name.upper(), total)
+    with torch.no_grad():
+        for i, row in enumerate(iterator, start=1):
+            prompt = build_multiple_choice_prompt(row["question"], row["choices"])
+            retrieval_query = _build_dense_query(row, query_mode)
+            knowledge_ids = retriever.retrieve_from_texts([retrieval_query])
+            pad_id = tokenizer.pad_token_id
+            clean_ids = [t for t in knowledge_ids[0].tolist() if t != pad_id]
+            compressed_text = tokenizer.decode(clean_ids, skip_special_tokens=True)
+            context = f"Context: {compressed_text}\n\n{prompt}"
+            context_ids = tokenizer.encode(context, add_special_tokens=False)
+            from experiments.e2.scoring import score_choices
+
+            pred = score_choices(model, tokenizer, context_ids, device)
+            if pred == row["label"]:
+                correct += 1
+            iterator.set_postfix(acc=f"{correct / i:.4f}", correct=f"{correct}/{i}")
+    acc = correct / total if total else 0.0
+    logger.info("✅ %s | Dense RAG | done | acc=%.4f | correct=%d/%d", dataset_name.upper(), acc, correct, total)
+    return {"acc": acc, "correct": correct, "total": total}
+
+
 def _print_report(results: Dict[str, Any]) -> None:
     _log_section("📊 E7 SUMMARY")
     logger.info("%-24s %10s %10s %10s", "group", "MEDQA", "ARC", "MMLU")
     logger.info("%s", "-" * 64)
     for key, label in [
         ("B0_qwen3_base", "B0 Qwen3-0.6B"),
-        ("B1_qwen3_rag", "B1 Qwen3-0.6B+RAG"),
-        ("S1_p1_p2_p3", "S1 P1->P2->P3"),
-        ("S2_p1_p3_infer", "S2 P1->P3 Infer"),
-        ("S3_p2oracle_p1_p3", "S3 P2oracle->P1->P3"),
+        ("TF_dense_p3_infer", "TF Dense->P3"),
+        ("RAG_dense", "Dense RAG"),
     ]:
         logger.info(
             "%-24s %10.2f%% %10.2f%% %10.2f%%",
@@ -110,12 +152,8 @@ def _print_report(results: Dict[str, Any]) -> None:
     logger.info("%-24s %10s %10s %10s", "delta", "MEDQA", "ARC", "MMLU")
     logger.info("%s", "-" * 64)
     for key, label in [
-        ("S1_minus_B0", "S1 - B0"),
-        ("S1_minus_B1", "S1 - B1"),
-        ("S2_minus_B0", "S2 - B0"),
-        ("S2_minus_B1", "S2 - B1"),
-        ("S3_minus_B0", "S3 - B0"),
-        ("S3_minus_B1", "S3 - B1"),
+        ("TF_minus_B0", "TF - B0"),
+        ("RAG_minus_B0", "RAG - B0"),
     ]:
         logger.info(
             "%-24s %10.2f%% %10.2f%% %10.2f%%",
@@ -128,13 +166,12 @@ def _print_report(results: Dict[str, Any]) -> None:
 
 def run_e7_all(
     cfg: Config,
-    phase1_weights: str,
-    scheme1_weights: str,
-    scheme2_weights: str,
-    scheme3_weights: str,
+    dense_indices: Dict[str, str],
+    training_free_weights: str,
     device: str = "cuda:0",
     max_samples: int = -1,
     output_path: Optional[str] = None,
+    query_mode: str = "question_only",
 ) -> Dict[str, Any]:
     setup_logging()
     started = time.time()
@@ -142,17 +179,15 @@ def run_e7_all(
 
     _log_section("🌍 E7 BENCHMARK COMPARE")
     logger.info(
-        "E7 start | phase1=%s | s1=%s | s2=%s | s3=%s | device=%s | max_samples=%d",
-        phase1_weights,
-        scheme1_weights,
-        scheme2_weights,
-        scheme3_weights,
+        "E7 start | dense_indices=%s | tf=%s | device=%s | max_samples=%d | query_mode=%s",
+        dense_indices,
+        training_free_weights,
         device,
         max_samples,
+        query_mode,
     )
 
     datasets = _load_datasets(max_samples=max_samples)
-    knowledge_maps = _load_knowledge_maps(cfg)
     logger.info(
         "Datasets loaded | MedQA=%d | ARC=%d | MMLU=%d",
         len(datasets["medqa"]),
@@ -161,23 +196,21 @@ def run_e7_all(
     )
 
     results: Dict[str, Any] = {
-        "phase1_weights": phase1_weights,
-        "scheme1_weights": scheme1_weights,
-        "scheme2_weights": scheme2_weights,
-        "scheme3_weights": scheme3_weights,
+        "dense_indices": dense_indices,
+        "training_free_weights": training_free_weights,
         "device": device,
         "max_samples": max_samples,
+        "query_mode": query_mode,
         "medqa": {},
         "arc": {},
         "mmlu": {},
     }
 
-    _log_section("📌 B0 / B1")
+    _log_section("📌 B0")
     baseline_model, baseline_tokenizer = build_baseline_model(cfg, device=device)
     try:
         for ds_name in ("medqa", "arc", "mmlu"):
             rows = datasets[ds_name]
-            km = knowledge_maps[ds_name]
             results[ds_name]["B0_qwen3_base"] = eval_baseline(
                 baseline_model,
                 baseline_tokenizer,
@@ -185,101 +218,75 @@ def run_e7_all(
                 device_obj,
                 ds_name,
             )
-            results[ds_name]["B1_qwen3_rag"] = eval_rag_compressed(
-                baseline_model,
-                baseline_tokenizer,
-                rows,
-                device_obj,
-                ds_name,
-                knowledge_map=km,
-            )
     finally:
         del baseline_model
         if torch.cuda.is_available() and device_obj.type == "cuda":
             torch.cuda.empty_cache()
 
-    retriever = Phase1Retriever(cfg, checkpoint_dir=phase1_weights, device=device_obj)
-
-    _log_section("📌 S1")
-    scheme1_model, scheme1_tokenizer = build_injection_model(cfg, scheme1_weights, device=device, log_prefix="E7LoadS1")
+    _log_section("📌 TF")
+    training_free_model, training_free_tokenizer = build_injection_model(
+        cfg,
+        training_free_weights,
+        device=device,
+        log_prefix="E7LoadTF",
+    )
     try:
         for ds_name in ("medqa", "arc", "mmlu"):
-            results[ds_name]["S1_p1_p2_p3"] = eval_phase1_router_fusion(
-                scheme1_model,
-                scheme1_tokenizer,
+            retriever = DenseRetriever(cfg=cfg, index_path=dense_indices[ds_name], device=device_obj, tokenizer=training_free_tokenizer)
+            results[ds_name]["TF_dense_p3_infer"] = eval_dense_fusion(
+                training_free_model,
+                training_free_tokenizer,
                 retriever,
                 datasets[ds_name],
                 device_obj,
                 ds_name,
-                "S1",
+                "TF",
+                query_mode=query_mode,
             )
+            del retriever
+            if torch.cuda.is_available() and device_obj.type == "cuda":
+                torch.cuda.empty_cache()
     finally:
-        del scheme1_model
+        del training_free_model
         if torch.cuda.is_available() and device_obj.type == "cuda":
             torch.cuda.empty_cache()
 
-    _log_section("📌 S2")
-    scheme2_model, scheme2_tokenizer = build_injection_model(cfg, scheme2_weights, device=device, log_prefix="E7LoadS2")
+    _log_section("📌 RAG")
+    rag_model, rag_tokenizer = build_baseline_model(cfg, device=device)
     try:
         for ds_name in ("medqa", "arc", "mmlu"):
-            results[ds_name]["S2_p1_p3_infer"] = eval_phase1_router_fusion(
-                scheme2_model,
-                scheme2_tokenizer,
+            retriever = DenseRetriever(cfg=cfg, index_path=dense_indices[ds_name], device=device_obj, tokenizer=rag_tokenizer)
+            results[ds_name]["RAG_dense"] = eval_dense_rag(
+                rag_model,
+                rag_tokenizer,
                 retriever,
                 datasets[ds_name],
                 device_obj,
                 ds_name,
-                "S2",
+                query_mode=query_mode,
             )
+            del retriever
+            if torch.cuda.is_available() and device_obj.type == "cuda":
+                torch.cuda.empty_cache()
     finally:
-        del scheme2_model
+        del rag_model
         if torch.cuda.is_available() and device_obj.type == "cuda":
             torch.cuda.empty_cache()
-
-    _log_section("📌 S3")
-    scheme3_model, scheme3_tokenizer = build_injection_model(cfg, scheme3_weights, device=device, log_prefix="E7LoadS3")
-    try:
-        for ds_name in ("medqa", "arc", "mmlu"):
-            results[ds_name]["S3_p2oracle_p1_p3"] = eval_phase1_router_fusion(
-                scheme3_model,
-                scheme3_tokenizer,
-                retriever,
-                datasets[ds_name],
-                device_obj,
-                ds_name,
-                "S3",
-            )
-    finally:
-        del scheme3_model
-        if torch.cuda.is_available() and device_obj.type == "cuda":
-            torch.cuda.empty_cache()
-
-    del retriever
-    if torch.cuda.is_available() and device_obj.type == "cuda":
-        torch.cuda.empty_cache()
 
     results["summary"] = {}
     for ds_name in ("medqa", "arc", "mmlu"):
         b0 = results[ds_name]["B0_qwen3_base"]["acc"]
-        b1 = results[ds_name]["B1_qwen3_rag"]["acc"]
-        s1 = results[ds_name]["S1_p1_p2_p3"]["acc"]
-        s2 = results[ds_name]["S2_p1_p3_infer"]["acc"]
-        s3 = results[ds_name]["S3_p2oracle_p1_p3"]["acc"]
+        tf = results[ds_name]["TF_dense_p3_infer"]["acc"]
+        rag = results[ds_name]["RAG_dense"]["acc"]
         results["summary"][ds_name] = {
-            "S1_minus_B0": s1 - b0,
-            "S1_minus_B1": s1 - b1,
-            "S2_minus_B0": s2 - b0,
-            "S2_minus_B1": s2 - b1,
-            "S3_minus_B0": s3 - b0,
-            "S3_minus_B1": s3 - b1,
-            "best_acc": max(b0, b1, s1, s2, s3),
+            "TF_minus_B0": tf - b0,
+            "RAG_minus_B0": rag - b0,
+            "best_acc": max(b0, tf, rag),
             "best_group": max(
                 [
                     ("B0_qwen3_base", b0),
-                    ("B1_qwen3_rag", b1),
-                    ("S1_p1_p2_p3", s1),
-                    ("S2_p1_p3_infer", s2),
-                    ("S3_p2oracle_p1_p3", s3),
+                    ("TF_dense_p3_infer", tf),
+                    ("RAG_dense", rag),
                 ],
                 key=lambda x: x[1],
             )[0],

@@ -1,11 +1,9 @@
 # E7 Multi-Benchmark Compare
 
-E7 用来在三个 benchmark 上统一比较 5 组方法：
+E7 用来在三个 benchmark 上统一比较 4 组方法：
 
 - `B0_qwen3_base`
   `Qwen3-0.6B` 直接做多选题打分
-- `B1_qwen3_rag`
-  `Qwen3-0.6B + RAG`，使用现有 `*_knowledge.jsonl` 压缩知识映射
 - `S1_p1_p2_p3`
   方案一：`Phase1 -> Phase2 -> Phase3`
 - `S2_p1_p3_infer`
@@ -24,7 +22,6 @@ E7 用来在三个 benchmark 上统一比较 5 组方法：
 - `S1/S2/S3` 都使用同一个 `Phase1` router 做在线检索。
 - 检索 query 使用和下游打分一致的完整 prompt：
   `Question + A/B/C/D + Answer:`
-- `B1_qwen3_rag` 目前使用仓库里已有的压缩知识映射，作为 `Qwen3-0.6B with RAG` 基线。
 
 ## 运行
 
