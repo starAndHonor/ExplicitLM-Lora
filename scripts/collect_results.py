@@ -674,11 +674,252 @@ def _summarize_e7_retrieval(path: Path, data: dict[str, Any]) -> Section:
     return Section("E7", lines)
 
 
+def _summarize_e8a(path: Path, data: dict[str, Any]) -> Section:
+    metrics = data.get("metrics", {})
+    lines = [
+        "**Config**",
+        "",
+        f"- `Dataset`: `{data.get('dataset', '-')}`",
+        f"- `Query Mode`: `{data.get('query_mode', '-')}`",
+        f"- `Edits`: `{data.get('n_edits', '-')}`",
+        f"- `Seed`: `{data.get('seed', '-')}`",
+        f"- `Phase3 Weights`: `{_ckpt_label(data.get('phase3_weights'))}`",
+        f"- `File`: `{_rel(path)}`",
+        "",
+    ]
+    lines.extend(
+        _table(
+            ["指标", "数值"],
+            [
+                ["Pre-write Acc", _pct(metrics.get("pre_write_acc"))],
+                ["Post-write Acc", _pct(metrics.get("post_write_acc"))],
+                ["Write Success Rate", _pct(metrics.get("write_success_rate"))],
+                ["Retrieval Top1 Before", _pct(metrics.get("retrieval_top1_before"))],
+                ["Retrieval Top1 After", _pct(metrics.get("retrieval_top1_after"))],
+                ["Mean Write Latency (ms)", _num(metrics.get("mean_write_latency_ms"), 2)],
+            ],
+        )
+    )
+    return Section("E8", lines)
+
+
+def _summarize_e8b(path: Path, data: dict[str, Any]) -> Section:
+    metrics = data.get("metrics", {})
+    lines = [
+        "**Config**",
+        "",
+        f"- `Dataset`: `{data.get('dataset', '-')}`",
+        f"- `Query Mode`: `{data.get('query_mode', '-')}`",
+        f"- `Cases`: `{data.get('n_cases', '-')}`",
+        f"- `Seed`: `{data.get('seed', '-')}`",
+        f"- `Phase3 Weights`: `{_ckpt_label(data.get('phase3_weights'))}`",
+        f"- `File`: `{_rel(path)}`",
+        "",
+    ]
+    lines.extend(
+        _table(
+            ["指标", "数值"],
+            [
+                ["Pre-delete Acc", _pct(metrics.get("pre_delete_acc"))],
+                ["Post-delete Acc", _pct(metrics.get("post_delete_acc"))],
+                ["Post-rollback Acc", _pct(metrics.get("post_rollback_acc"))],
+                ["Delete Success Rate", _pct(metrics.get("delete_success_rate"))],
+                ["Rollback Fidelity", _pct(metrics.get("rollback_fidelity"))],
+                ["Retrieval Top1 Before", _pct(metrics.get("retrieval_top1_before"))],
+                ["Retrieval Top1 After Delete", _pct(metrics.get("retrieval_top1_after_delete"))],
+                ["Retrieval Top1 After Rollback", _pct(metrics.get("retrieval_top1_after_rollback"))],
+                ["Mean Delete Latency (ms)", _num(metrics.get("mean_delete_latency_ms"), 2)],
+                ["Mean Rollback Latency (ms)", _num(metrics.get("mean_rollback_latency_ms"), 2)],
+            ],
+        )
+    )
+    return Section("E8", lines)
+
+
+def _summarize_e8c(path: Path, data: dict[str, Any]) -> Section:
+    baseline = data.get("baseline", {})
+    step_details = data.get("step_details", [])
+    lines = [
+        "**Config**",
+        "",
+        f"- `Dataset`: `{data.get('dataset', '-')}`",
+        f"- `Query Mode`: `{data.get('query_mode', '-')}`",
+        f"- `Steps`: `{data.get('steps', '-')}`",
+        f"- `Seed`: `{data.get('seed', '-')}`",
+        f"- `Locality Samples`: `{data.get('locality_samples', '-')}`",
+        f"- `Operation Pattern`: `{data.get('operation_pattern', '-')}`",
+        f"- `Phase3 Weights`: `{_ckpt_label(data.get('phase3_weights'))}`",
+        f"- `File`: `{_rel(path)}`",
+        "",
+        "**Baseline**",
+        "",
+    ]
+    lines.extend(
+        _table(
+            ["指标", "数值"],
+            [
+                ["Full Edit QA Acc", _pct(baseline.get("full_edit_qa_acc"))],
+                ["Full Edit Retrieval Top1", _pct(baseline.get("full_edit_retrieval_top1"))],
+                ["Locality QA Acc", _pct(baseline.get("locality_qa_acc"))],
+                ["Locality Retrieval Top1", _pct(baseline.get("locality_retrieval_top1"))],
+            ],
+        )
+    )
+    if step_details:
+        lines.extend([
+            "",
+            "**Key Steps**",
+            "",
+        ])
+        key_rows: list[list[str]] = []
+        for detail in step_details:
+            last_op = detail.get("last_operation", {})
+            key_rows.append([
+                str(detail.get("step", "-")),
+                str(last_op.get("op", "-")),
+                _pct(detail.get("present_qa_acc")),
+                _pct(detail.get("present_retrieval_top1")),
+                _pct(detail.get("delete_success_rate")),
+                _pct(detail.get("rollback_fidelity")),
+                _pct(detail.get("locality_retention")),
+            ])
+        lines.extend(
+            _table(
+                ["Step", "Last Op", "Edit Acc", "Edit Top1", "Delete Success", "Rollback Fidelity", "Locality Retention"],
+                key_rows,
+            )
+        )
+    return Section("E8", lines)
+
+
+def _summarize_e8d_a(path: Path, data: dict[str, Any]) -> Section:
+    metrics = data.get("metrics", {})
+    lines = [
+        "**Config**",
+        "",
+        f"- `Dataset`: `{data.get('dataset', '-')}`",
+        f"- `Query Mode`: `{data.get('query_mode', '-')}`",
+        f"- `Ingested`: `{data.get('n_ingested', '-')}`",
+        f"- `Locality Samples`: `{data.get('locality_samples', '-')}`",
+        f"- `Seed`: `{data.get('seed', '-')}`",
+        f"- `Phase3 Weights`: `{_ckpt_label(data.get('phase3_weights'))}`",
+        f"- `File`: `{_rel(path)}`",
+        "",
+    ]
+    lines.extend(
+        _table(
+            ["指标", "数值"],
+            [
+                ["Old QA Retention", _pct(metrics.get("old_qa_retention"))],
+                ["Old Retrieval Retention", _pct(metrics.get("old_retrieval_retention"))],
+                ["Ingest QA Acc Before", _pct(metrics.get("ingest_qa_acc_before"))],
+                ["Ingest QA Acc After", _pct(metrics.get("ingest_qa_acc_after"))],
+                ["Ingest Retrieval Top1 Before", _pct(metrics.get("ingest_retrieval_top1_before"))],
+                ["Ingest Retrieval Top1 After", _pct(metrics.get("ingest_retrieval_top1_after"))],
+                ["Bulk Ingest Latency (ms)", _num(metrics.get("bulk_ingest_latency_ms"), 2)],
+                ["Mean Ingest Latency (ms)", _num(metrics.get("mean_ingest_latency_ms"), 2)],
+                ["Throughput (docs/s)", _num(metrics.get("ingest_throughput_docs_per_sec"), 2)],
+            ],
+        )
+    )
+    return Section("E8", lines)
+
+
+def _summarize_e8d_b(path: Path, data: dict[str, Any]) -> Section:
+    metrics = data.get("metrics", {})
+    add_stage = data.get("add_stage", [])
+    delete_stage = data.get("delete_stage", [])
+    lines = [
+        "**Config**",
+        "",
+        f"- `Dataset`: `{data.get('dataset', '-')}`",
+        f"- `Query Mode`: `{data.get('query_mode', '-')}`",
+        f"- `Add Count`: `{data.get('n_add', '-')}`",
+        f"- `Delete Count`: `{data.get('n_delete', '-')}`",
+        f"- `Update Batch Size`: `{data.get('update_batch_size', '-')}`",
+        f"- `Locality Samples`: `{data.get('locality_samples', '-')}`",
+        f"- `Seed`: `{data.get('seed', '-')}`",
+        f"- `Phase3 Weights`: `{_ckpt_label(data.get('phase3_weights'))}`",
+        f"- `File`: `{_rel(path)}`",
+        "",
+    ]
+    lines.extend(
+        _table(
+            ["指标", "数值"],
+            [
+                ["Add QA Acc Before", _pct(metrics.get("add_qa_acc_before"))],
+                ["Add QA Acc After", _pct(metrics.get("add_qa_acc_after"))],
+                ["Add Retrieval Top1 Before", _pct(metrics.get("add_retrieval_top1_before"))],
+                ["Add Retrieval Top1 After", _pct(metrics.get("add_retrieval_top1_after"))],
+                ["Delete QA Acc Before", _pct(metrics.get("delete_qa_acc_before"))],
+                ["Delete QA Acc After", _pct(metrics.get("delete_qa_acc_after"))],
+                ["Delete Retrieval Top1 Before", _pct(metrics.get("delete_retrieval_top1_before"))],
+                ["Delete Retrieval Top1 After", _pct(metrics.get("delete_retrieval_top1_after"))],
+                ["Old QA Retention", _pct(metrics.get("old_qa_retention_after_updates"))],
+                ["Old Retrieval Retention", _pct(metrics.get("old_retrieval_retention_after_updates"))],
+                ["Mean Add Latency (ms)", _num(metrics.get("mean_add_latency_ms"), 2)],
+                ["Mean Delete Latency (ms)", _num(metrics.get("mean_delete_latency_ms"), 2)],
+                ["Final Tombstone Ratio", _pct(metrics.get("tombstone_ratio_final"))],
+            ],
+        )
+    )
+    stage_rows: list[list[str]] = []
+    if add_stage:
+        first = add_stage[0]
+        last = add_stage[-1]
+        stage_rows.append([
+            "Add",
+            str(first.get("added_so_far", "-")),
+            _pct(first.get("add_qa_acc")),
+            _pct(first.get("add_retrieval_top1")),
+            _pct(first.get("old_qa_acc")),
+            _num(first.get("latency_ms"), 2),
+        ])
+        if last is not first:
+            stage_rows.append([
+                "Add Final",
+                str(last.get("added_so_far", "-")),
+                _pct(last.get("add_qa_acc")),
+                _pct(last.get("add_retrieval_top1")),
+                _pct(last.get("old_qa_acc")),
+                _num(last.get("latency_ms"), 2),
+            ])
+    if delete_stage:
+        first = delete_stage[0]
+        last = delete_stage[-1]
+        stage_rows.append([
+            "Delete",
+            str(first.get("deleted_so_far", "-")),
+            _pct(first.get("delete_qa_acc")),
+            _pct(first.get("delete_retrieval_top1")),
+            _pct(first.get("old_qa_acc")),
+            _num(first.get("latency_ms"), 2),
+        ])
+        if last is not first:
+            stage_rows.append([
+                "Delete Final",
+                str(last.get("deleted_so_far", "-")),
+                _pct(last.get("delete_qa_acc")),
+                _pct(last.get("delete_retrieval_top1")),
+                _pct(last.get("old_qa_acc")),
+                _num(last.get("latency_ms"), 2),
+            ])
+    if stage_rows:
+        lines.extend(["", "**Stage Summary**", ""])
+        lines.extend(
+            _table(
+                ["Stage", "Updated", "Edit Acc", "Edit Top1", "Old QA Acc", "Latency (ms)"],
+                stage_rows,
+            )
+        )
+    return Section("E8", lines)
+
+
 def _detect_experiment(path: Path, data: dict[str, Any]) -> str | None:
     parent = path.parent.name.lower()
     name = path.name.lower()
     exp_field = str(data.get("experiment", "")).lower()
-    for token in ("e1", "e2", "e3", "e4", "e5", "e6", "e7"):
+    for token in ("e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"):
         if token == parent or name.startswith(f"{token}_") or exp_field.startswith(token):
             return token.upper()
     return None
@@ -707,11 +948,23 @@ def _make_section(path: Path) -> Section | None:
             return _summarize_e7(path, data)
         if all(isinstance(data.get(ds), dict) and "results" in data.get(ds, {}) for ds in ("medqa", "arc", "mmlu")):
             return _summarize_e7_retrieval(path, data)
+    if exp == "E8":
+        kind = str(data.get("experiment", "")).lower()
+        if kind == "e8a":
+            return _summarize_e8a(path, data)
+        if kind == "e8b":
+            return _summarize_e8b(path, data)
+        if kind == "e8c":
+            return _summarize_e8c(path, data)
+        if kind == "e8d_a":
+            return _summarize_e8d_a(path, data)
+        if kind == "e8d_b":
+            return _summarize_e8d_b(path, data)
     return None
 
 
 def build_summary() -> str:
-    sections_by_exp: dict[str, list[Section]] = {f"E{i}": [] for i in range(1, 8)}
+    sections_by_exp: dict[str, list[Section]] = {f"E{i}": [] for i in range(1, 9)}
     all_paths = _scan_results()
 
     e1_paths = [path for path in all_paths if path.parent.name.lower() == "e1" or path.name.lower().startswith("e1_")]
@@ -741,7 +994,7 @@ def build_summary() -> str:
         *_model_overview(),
     ]
 
-    for exp in (f"E{i}" for i in range(1, 8)):
+    for exp in (f"E{i}" for i in range(1, 9)):
         sections = sections_by_exp[exp]
         lines.append(f"## {exp}")
         lines.append("")

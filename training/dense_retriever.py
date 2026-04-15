@@ -63,7 +63,7 @@ class DenseRetriever:
         encoder_t0 = time.time()
         self.encoder = KnowledgeEncoder(
             base_model=base_model,
-            encoder_depth=cfg.model.retrieval_encoder_depth,
+            encoder_depth=cfg.model.retrieval_encoder_depth,   # r0：纯词嵌入，0 层
             hidden_dim=cfg.model.hidden_dim,
             mode=cfg.model.knowledge_encoder_mode,
         )
@@ -118,7 +118,7 @@ class DenseRetriever:
     def tokenize_queries(self, texts: list[str]) -> tuple[Tensor, Tensor]:
         encoded = self.tokenizer(
             texts,
-            max_length=self.cfg.model.anchor_length,
+            max_length=self.cfg.model.fusion_length,   # 统一单视图
             truncation=True,
             padding="max_length",
             add_special_tokens=False,

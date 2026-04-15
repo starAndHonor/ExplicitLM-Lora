@@ -117,12 +117,22 @@ class KnowledgeEncoder(nn.Module):
         # Phase 3: 初始化时冻结所有共享组件
         self._freeze_all()
 
+        if self.encoder_depth <= 0:
+            layer_usage = "embedding_only"
+            retrieval_path = "embed_tokens -> final_norm -> mean_pool"
+        else:
+            last_layer = self.encoder_depth - 1
+            layer_usage = f"layers[0:{self.encoder_depth}] (0-{last_layer})"
+            retrieval_path = f"embed_tokens -> layers 0-{last_layer} -> final_norm -> mean_pool"
+
         logger.info(
-            "KnowledgeEncoder 初始化完毕 (encoder_depth=%d, hidden_dim=%d, mode=%s)",
+            "KnowledgeEncoder 初始化完毕 (encoder_depth=%d, hidden_dim=%d, mode=%s, layer_usage=%s)",
             encoder_depth,
             hidden_dim,
             self.mode,
+            layer_usage,
         )
+        logger.info("KnowledgeEncoder 检索路径: %s", retrieval_path)
 
     def _freeze_all(self) -> None:
         """

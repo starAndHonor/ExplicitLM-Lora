@@ -8,7 +8,7 @@ import os
 import random
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
@@ -35,6 +35,7 @@ def _setup_logging() -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Overlay task knowledge onto an existing dense index while keeping total size fixed")
     parser.add_argument("--config", default="config/default.yaml")
+    parser.add_argument("--override", nargs="?", action="append", help="config overrides")
     parser.add_argument("--index", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--input", default="", help="Single-source jsonl/parquet/txt")
@@ -46,6 +47,33 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def _parse_overrides(overrides: list[str] | None) -> dict[str, Any]:
+    if overrides is None:
+        return {}
+    flat: list[str] = []
+    for item in overrides:
+        if isinstance(item, list):
+            flat.extend(item)
+        else:
+            flat.append(item)
+    result: dict[str, Any] = {}
+    for item in flat:
+        if "=" not in item:
+            raise ValueError(f"invalid override (missing '='): {item}")
+        key, value = item.split("=", 1)
+        if value.lower() in {"true", "false"}:
+            result[key] = value.lower() == "true"
+        else:
+            try:
+                result[key] = int(value)
+            except ValueError:
+                try:
+                    result[key] = float(value)
+                except ValueError:
+                    result[key] = value
+    return result
 
 
 def _load_rows(path: Path, limit: int) -> List[Dict[str, object]]:
@@ -238,7 +266,7 @@ def _encode_embeddings(encoder: KnowledgeEncoder, ids: torch.Tensor, mask: torch
 def main() -> None:
     _setup_logging()
     args = _parse_args()
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
 
     dense_index = DenseKnowledgeIndex.load(args.index)
     target_size = len(dense_index)

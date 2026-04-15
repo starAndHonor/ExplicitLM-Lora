@@ -13,8 +13,8 @@ model:
   injection_method: "attention"
   # 注入模块所在层索引（从 0 起，每 6 层一个注入点）
   injection_layers: [6, 12, 18, 24]
-  # 检索侧编码器使用 Qwen3 前 N 层（Dense/Router retrieval）
-  retrieval_encoder_depth: 24
+  # 检索侧编码器使用 Qwen3 前 N 层（0 = 纯词嵌入 mean pool，不经过 Transformer）
+  retrieval_encoder_depth: 0
   # 融合/注入侧编码器使用 Qwen3 前 N 层（Phase2/Phase3）
   fusion_encoder_depth: 6
   # 知识编码器模式: "trainable" | "qwen3"
@@ -108,7 +108,7 @@ paths:
   # 基础模型权重目录（可被 .env 中的 MODEL_PATH 覆盖为绝对路径）
   model_dir: "Qwen3-0.6B"
   # LLMLingua 压缩模型目录（可被 .env 中的 LLMLINGUA_PATH 覆盖）
-  llmlingua_model_dir: "models/llmlingua-2-xlm-roberta-large"
+  llmlingua_model_dir: "llmlingua-2-xlm-roberta-large"
   # 数据根目录
   data_dir: "data"
   # 训练检查点保存目录

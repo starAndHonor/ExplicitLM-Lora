@@ -32,6 +32,22 @@ def _parse_args() -> argparse.Namespace:
         default="question_only",
         help="Dense retrieval query formulation",
     )
+    parser.add_argument(
+        "--enable-e5-phase3",
+        action="store_true",
+        help="Enable extra group: E5 retriever -> Phase3 injection model",
+    )
+    parser.add_argument(
+        "--e5-model-name",
+        default="intfloat/e5-base-v2",
+        help="HF model name for E5 retriever encoder",
+    )
+    parser.add_argument("--e5-anchor-medqa", default="", help="E5 anchor JSONL for MedQA")
+    parser.add_argument("--e5-fusion-medqa", default="", help="E5 fusion JSONL for MedQA")
+    parser.add_argument("--e5-anchor-arc", default="", help="E5 anchor JSONL for ARC")
+    parser.add_argument("--e5-fusion-arc", default="", help="E5 fusion JSONL for ARC")
+    parser.add_argument("--e5-anchor-mmlu", default="", help="E5 anchor JSONL for MMLU")
+    parser.add_argument("--e5-fusion-mmlu", default="", help="E5 fusion JSONL for MMLU")
     parser.add_argument("--override", nargs="?", action="append", help="config overrides")
     return parser.parse_args()
 
@@ -72,9 +88,43 @@ def _resolve(path_str: str) -> str:
     return str(path if path.is_absolute() else (PROJECT_ROOT / path).resolve())
 
 
+def _default_e5_sources() -> dict[str, dict[str, str]]:
+    return {
+        "medqa": {
+            "anchor": str((PROJECT_ROOT / "data/medqa_knowledge_original_text.jsonl").resolve()),
+            "fusion": str((PROJECT_ROOT / "data/medqa_knowledge.jsonl").resolve()),
+        },
+        "arc": {
+            "anchor": str((PROJECT_ROOT / "data/arc_knowledge_original_text.jsonl").resolve()),
+            "fusion": str((PROJECT_ROOT / "data/arc_knowledge.jsonl").resolve()),
+        },
+        "mmlu": {
+            "anchor": str((PROJECT_ROOT / "data/mmlu_knowledge_original_text.jsonl").resolve()),
+            "fusion": str((PROJECT_ROOT / "data/mmlu_knowledge.jsonl").resolve()),
+        },
+    }
+
+
 def main() -> None:
     args = _parse_args()
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
+    e5_sources = None
+    if args.enable_e5_phase3:
+        defaults = _default_e5_sources()
+        e5_sources = {
+            "medqa": {
+                "anchor": _resolve(args.e5_anchor_medqa) if args.e5_anchor_medqa else defaults["medqa"]["anchor"],
+                "fusion": _resolve(args.e5_fusion_medqa) if args.e5_fusion_medqa else defaults["medqa"]["fusion"],
+            },
+            "arc": {
+                "anchor": _resolve(args.e5_anchor_arc) if args.e5_anchor_arc else defaults["arc"]["anchor"],
+                "fusion": _resolve(args.e5_fusion_arc) if args.e5_fusion_arc else defaults["arc"]["fusion"],
+            },
+            "mmlu": {
+                "anchor": _resolve(args.e5_anchor_mmlu) if args.e5_anchor_mmlu else defaults["mmlu"]["anchor"],
+                "fusion": _resolve(args.e5_fusion_mmlu) if args.e5_fusion_mmlu else defaults["mmlu"]["fusion"],
+            },
+        }
     run_e7_all(
         cfg=cfg,
         dense_indices={
@@ -87,6 +137,8 @@ def main() -> None:
         max_samples=args.max_samples,
         output_path=args.output,
         query_mode=args.query_mode,
+        e5_model_name=args.e5_model_name if args.enable_e5_phase3 else None,
+        e5_sources=e5_sources,
     )
 
 

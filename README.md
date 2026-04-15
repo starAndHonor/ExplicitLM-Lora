@@ -5,7 +5,7 @@
 - `dense retrieval`
 - `qwen3 / trainable` 两种知识编码模式
 - `Phase2 -> Phase3` 注入训练
-- `E1 ~ E7` 自动实验与结果汇总
+- `E1 ~ E8` 自动实验与结果汇总
 
 旧的 `scheme1 / scheme3` shell 入口已经移除，当前建议直接使用：
 
@@ -344,6 +344,7 @@ python scripts/collect_results.py
 - `E1 ~ E6`
 - `E7` 最终结果
 - `E7 retrieval precheck`
+- `E8` 全套 editable memory 结果
 
 ## 当前主线建议
 

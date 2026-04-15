@@ -24,6 +24,9 @@ QUERY_MODE="${QUERY_MODE:-question_only}"
 MAX_SAMPLES="${MAX_SAMPLES:--1}"
 DRY_RUN="${DRY_RUN:-0}"
 ANCHOR_VARIANTS="${ANCHOR_VARIANTS:-original_text,k256}"
+RETRIEVAL_DEPTH="${RETRIEVAL_DEPTH:-24}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
+TOKENIZE_BATCH_SIZE="${TOKENIZE_BATCH_SIZE:-10000}"
 
 DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/data}"
 PARQUET_DIR="${PARQUET_DIR:-${DATA_ROOT}/compressed/v2}"
@@ -36,6 +39,36 @@ BUILD_BASE="${BUILD_BASE:-1}"
 BUILD_OVERLAYS="${BUILD_OVERLAYS:-1}"
 SKIP_E7="${SKIP_E7:-0}"
 RUN_RETRIEVAL_EVAL="${RUN_RETRIEVAL_EVAL:-1}"
+
+declare -a EXTRA_ARGS=("$@")
+
+extract_retrieval_depth_from_args() {
+    local prev_is_override=0
+    local arg override_value
+    for arg in "${EXTRA_ARGS[@]}"; do
+        if [ "${prev_is_override}" = "1" ]; then
+            override_value="${arg}"
+            prev_is_override=0
+        elif [ "${arg}" = "--override" ]; then
+            prev_is_override=1
+            continue
+        elif [[ "${arg}" == --override=* ]]; then
+            override_value="${arg#--override=}"
+        else
+            continue
+        fi
+
+        if [[ "${override_value}" == model.retrieval_encoder_depth=* ]]; then
+            printf '%s' "${override_value#model.retrieval_encoder_depth=}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if depth_from_args="$(extract_retrieval_depth_from_args)"; then
+    RETRIEVAL_DEPTH="${depth_from_args}"
+fi
 
 MEDQA_ANCHOR="${MEDQA_ANCHOR:-${DATA_ROOT}/medqa_knowledge_original_text.jsonl}"
 MEDQA_FUSION="${MEDQA_FUSION:-${DATA_ROOT}/medqa_knowledge.jsonl}"
@@ -70,6 +103,9 @@ echo "[E7DenseFull] query_mode=${QUERY_MODE}"
 echo "[E7DenseFull] max_samples=${MAX_SAMPLES}"
 echo "[E7DenseFull] run_retrieval_eval=${RUN_RETRIEVAL_EVAL}"
 echo "[E7DenseFull] anchor_variants=${ANCHOR_VARIANTS}"
+echo "[E7DenseFull] retrieval_depth=${RETRIEVAL_DEPTH}"
+echo "[E7DenseFull] batch_size=${BATCH_SIZE}"
+echo "[E7DenseFull] tokenize_batch_size=${TOKENIZE_BATCH_SIZE}"
 
 if [ "${BUILD_BASE}" = "1" ]; then
     run_cmd \
@@ -81,8 +117,10 @@ if [ "${BUILD_BASE}" = "1" ]; then
         --sample-size 1048576 \
         --seed 0 \
         --device "${DEVICE}" \
-        --batch-size 256 \
-        --index-type flat
+        --batch-size "${BATCH_SIZE}" \
+        --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
+        --index-type flat \
+        "${EXTRA_ARGS[@]}"
 fi
 
 variant_medqa_anchor() {
@@ -110,15 +148,15 @@ variant_mmlu_anchor() {
 }
 
 variant_medqa_index() {
-    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_medqa_overlay_$1_flat_r24_qwen3.pt"
+    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_medqa_overlay_$1_flat_r${RETRIEVAL_DEPTH}_qwen3.pt"
 }
 
 variant_arc_index() {
-    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_arc_overlay_$1_flat_r24_qwen3.pt"
+    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_arc_overlay_$1_flat_r${RETRIEVAL_DEPTH}_qwen3.pt"
 }
 
 variant_mmlu_index() {
-    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_mmlu_overlay_$1_flat_r24_qwen3.pt"
+    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_mmlu_overlay_$1_flat_r${RETRIEVAL_DEPTH}_qwen3.pt"
 }
 
 IFS=',' read -r -a VARIANT_LIST <<< "${ANCHOR_VARIANTS}"
@@ -148,8 +186,10 @@ for variant in "${VARIANT_LIST[@]}"; do
             --fusion-input "${MEDQA_FUSION}" \
             --output "${MEDQA_INDEX}" \
             --device "${DEVICE}" \
-            --batch-size 256 \
-            --seed 42
+            --batch-size "${BATCH_SIZE}" \
+            --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
+            --seed 42 \
+            "${EXTRA_ARGS[@]}"
 
         run_cmd \
             conda run --no-capture-output -n ExplicitLLM \
@@ -160,8 +200,10 @@ for variant in "${VARIANT_LIST[@]}"; do
             --fusion-input "${ARC_FUSION}" \
             --output "${ARC_INDEX}" \
             --device "${DEVICE}" \
-            --batch-size 256 \
-            --seed 42
+            --batch-size "${BATCH_SIZE}" \
+            --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
+            --seed 42 \
+            "${EXTRA_ARGS[@]}"
 
         run_cmd \
             conda run --no-capture-output -n ExplicitLLM \
@@ -172,8 +214,10 @@ for variant in "${VARIANT_LIST[@]}"; do
             --fusion-input "${MMLU_FUSION}" \
             --output "${MMLU_INDEX}" \
             --device "${DEVICE}" \
-            --batch-size 256 \
-            --seed 42
+            --batch-size "${BATCH_SIZE}" \
+            --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
+            --seed 42 \
+            "${EXTRA_ARGS[@]}"
     fi
 
     if [ "${SKIP_E7}" = "1" ]; then
@@ -192,7 +236,8 @@ for variant in "${VARIANT_LIST[@]}"; do
             --top-k 16 \
             --query-mode "${QUERY_MODE}" \
             --limit "${MAX_SAMPLES}" \
-            --output "${PROJECT_ROOT}/results/e7/e7_dense_retrieval_precheck_${variant}.json"
+            --output "${PROJECT_ROOT}/results/e7/e7_dense_retrieval_precheck_${variant}_r${RETRIEVAL_DEPTH}.json" \
+            "${EXTRA_ARGS[@]}"
     fi
 
     run_cmd \
@@ -207,6 +252,7 @@ for variant in "${VARIANT_LIST[@]}"; do
         DENSE_INDEX_ARC="${ARC_INDEX}" \
         DENSE_INDEX_MMLU="${MMLU_INDEX}" \
         TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}" \
-        OUTPUT="${PROJECT_ROOT}/results/e7/e7_dense_${variant}_$(basename "${TRAINING_FREE_WEIGHTS}").json" \
-        bash "${PROJECT_ROOT}/experiments/e7/run.sh"
+        OUTPUT="${PROJECT_ROOT}/results/e7/e7_dense_${variant}_r${RETRIEVAL_DEPTH}_$(basename "${TRAINING_FREE_WEIGHTS}").json" \
+        bash "${PROJECT_ROOT}/experiments/e7/run.sh" \
+        "${EXTRA_ARGS[@]}"
 done

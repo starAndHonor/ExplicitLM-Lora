@@ -8,7 +8,7 @@ import os
 import random
 import sys
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import pandas as pd
 import torch
@@ -74,6 +74,7 @@ class ParquetEpochSampler:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a 1M dense index from FineWeb compressed parquet data")
     parser.add_argument("--config", default="config/default.yaml")
+    parser.add_argument("--override", nargs="?", action="append", help="config overrides")
     parser.add_argument("--parquet-dir", default=str(PROJECT_ROOT / "data/compressed/v2"))
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -86,6 +87,33 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--hnsw-ef-construction", type=int, default=200)
     parser.add_argument("--hnsw-ef-search", type=int, default=64)
     return parser.parse_args()
+
+
+def _parse_overrides(overrides: list[str] | None) -> dict[str, Any]:
+    if overrides is None:
+        return {}
+    flat: list[str] = []
+    for item in overrides:
+        if isinstance(item, list):
+            flat.extend(item)
+        else:
+            flat.append(item)
+    result: dict[str, Any] = {}
+    for item in flat:
+        if "=" not in item:
+            raise ValueError(f"invalid override (missing '='): {item}")
+        key, value = item.split("=", 1)
+        if value.lower() in {"true", "false"}:
+            result[key] = value.lower() == "true"
+        else:
+            try:
+                result[key] = int(value)
+            except ValueError:
+                try:
+                    result[key] = float(value)
+                except ValueError:
+                    result[key] = value
+    return result
 
 
 def _tokenize_texts(
@@ -133,7 +161,7 @@ def _encode_embeddings(
 def main() -> None:
     _setup_logging()
     args = _parse_args()
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
 
     sampler = ParquetEpochSampler(args.parquet_dir, args.sample_size)
     rows = sampler.sample_epoch_data(seed=args.seed)
@@ -153,25 +181,23 @@ def main() -> None:
     keys = [row["key"] for row in rows]
     texts = [row["text"] for row in rows]
     compressed = [row["compressed_text"] for row in rows]
-    anchor_ids, anchor_mask = _tokenize_texts(
-        texts, tokenizer, max_length=cfg.model.anchor_length, batch_size=args.tokenize_batch_size
-    )
-    fusion_ids, _ = _tokenize_texts(
+    # 单视图：fusion_ids 同时用于 embedding 和注入
+    fusion_ids, fusion_mask = _tokenize_texts(
         compressed, tokenizer, max_length=cfg.model.fusion_length, batch_size=args.tokenize_batch_size
     )
 
     base_model = load_base_model(model_path, bf16=cfg.train.bf16 and args.device != "cpu")
     encoder = KnowledgeEncoder(
         base_model=base_model,
-        encoder_depth=cfg.model.retrieval_encoder_depth,
+        encoder_depth=cfg.model.retrieval_encoder_depth,   # r0：纯词嵌入，0 层
         hidden_dim=cfg.model.hidden_dim,
         mode=cfg.model.knowledge_encoder_mode,
     )
     encoder.requires_grad_(False)
     encoder = encoder.to(args.device).eval()
 
-    logger.info("Encoding FineWeb dense embeddings | count=%d | batch_size=%d", len(texts), args.batch_size)
-    embeddings = _encode_embeddings(encoder, anchor_ids, anchor_mask, batch_size=args.batch_size)
+    logger.info("Encoding FineWeb dense embeddings (fusion view) | count=%d | batch_size=%d", len(texts), args.batch_size)
+    embeddings = _encode_embeddings(encoder, fusion_ids, fusion_mask, batch_size=args.batch_size)
 
     index = DenseKnowledgeIndex(
         dim=cfg.model.hidden_dim,

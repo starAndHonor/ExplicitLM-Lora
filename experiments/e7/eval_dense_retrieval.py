@@ -22,6 +22,7 @@ from training.dense_retriever import DenseRetriever
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate dense retrieval correctness across MedQA / ARC / MMLU")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config/default.yaml"))
+    parser.add_argument("--override", nargs="?", action="append", help="config overrides")
     parser.add_argument("--dense-index-medqa", required=True)
     parser.add_argument("--dense-index-arc", required=True)
     parser.add_argument("--dense-index-mmlu", required=True)
@@ -35,6 +36,33 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output", default="")
     return parser.parse_args()
+
+
+def _parse_overrides(overrides: list[str] | None) -> dict[str, Any]:
+    if overrides is None:
+        return {}
+    flat: list[str] = []
+    for item in overrides:
+        if isinstance(item, list):
+            flat.extend(item)
+        else:
+            flat.append(item)
+    result: dict[str, Any] = {}
+    for item in flat:
+        if "=" not in item:
+            raise ValueError(f"invalid override (missing '='): {item}")
+        key, value = item.split("=", 1)
+        if value.lower() in {"true", "false"}:
+            result[key] = value.lower() == "true"
+        else:
+            try:
+                result[key] = int(value)
+            except ValueError:
+                try:
+                    result[key] = float(value)
+                except ValueError:
+                    result[key] = value
+    return result
 
 
 def _trim_pad(ids: List[int], pad_token_id: int) -> List[int]:
@@ -155,7 +183,7 @@ def _evaluate_dataset(
 
 def main() -> None:
     args = _parse_args()
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
     cfg.train.bf16 = args.device != "cpu"
 
     summary = {

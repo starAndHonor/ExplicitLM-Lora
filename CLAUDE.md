@@ -1,200 +1,186 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 > [!URGENT]
 > **研究性项目 (Research Project)**
 > 1. 本项目为 MVP（最小可行性产品），严禁过度工程化。
 > 2. 你的所有思考过程和回复必须使用 **简体中文**。
 
-## 1. 项目元数据 (Metadata)
-- **核心目标**: 在本项目中，我们将主要致力于构建一种兼容各类大语言模型的内置持续学习模块。该模块旨在挑战现有大模型的知识存储与调用范式，使模型具备显式的动态知识更新能力。此方案不仅规避了参数重训的高昂算力成本与遗忘风险，也克服了传统外挂检索方案的局限，从而为打造高透明度、高可信度及可持续演进的新一代大语言模型架构提供创新性解法。
-- **项目类型**: MVP / 研究性项目
-- **后端架构**: Python 3.11
-- **版本管理**: Git
-- **Conda 环境**: ExplicitLLM (Python 3.11)
+## 1. 项目概述
 
-## 2. 常用命令 (Commands)
+**核心目标**: 为大语言模型构建内置持续学习模块，使模型具备显式的动态知识更新能力。核心思路是：将知识存储在外部索引中，通过 dense retrieval 检索，再利用 forward hook 将知识注入冻结的 LLM，规避参数重训的算力成本与遗忘风险。
 
-### 2.1 Conda 环境管理
+**基座模型**: Qwen3-0.6B（冻结，不更新参数）
 
-> [!CRITICAL]
-> **所有 Python 相关命令必须在 ExplicitLLM 环境中执行**
-> - 使用 `conda run -n ExplicitLLM <command>` 确保命令在正确环境中运行
-> - 或在命令前显式添加 `source activate ExplicitLLM &&`
-> - 如果需要使用llm可以依据 '.env'环境变量文件使用
+**当前主线**: dense retrieval + qwen3/trainable 知识编码模式
 
-> [!CRITICAL]
-> **GPU 使用规范：必须且只能使用 GPU 6（系统第 7 块，索引从 0 开始）**
-> - 所有涉及 GPU 的命令必须通过 `CUDA_VISIBLE_DEVICES=6` 指定
-> - 示例：`CUDA_VISIBLE_DEVICES=6 conda run -n ExplicitLLM python xxx`
-> - **严禁**硬编码其他 GPU 索引，**严禁**省略 `CUDA_VISIBLE_DEVICES` 导致占用其他 GPU
+**三层训练管线**:
+- **Phase 1**: Router 训练 — 在 FineWeb-Edu 上训练路由器（PKM 粗排 + RefinedSelector 精排，旧方案）
+- **Phase 2**: Fusion 预训练 — 训练 KnowledgeEncoder + AttentionInjection 模块（4层 hook）
+- **Phase 3**: 下游 SFT — 在 MedQA 上微调，支持接 dense index 作为知识源，带 early stopping
+
+**实验矩阵**: E1-E8，覆盖路由质量、跨域评估、RAG 对比、消融、效率、dense retrieval 扩展、editable memory。
+
+## 2. 环境与命令
+
+### 2.1 环境
+
+- **Conda 环境**: `ExplicitLLM`（Python 3.11）
+- **GPU 规范**: 必须且只能使用 GPU 6 — 所有 GPU 命令加 `CUDA_VISIBLE_DEVICES=6`
+- **LLM**: 可通过 `.env` 环境变量配置
 
 ```bash
-# 激活项目环境（交互式 shell）
+# 激活环境
 conda activate ExplicitLLM
 
-# 推荐：使用 conda run 执行命令（自动使用正确环境）
-conda run -n ExplicitLLM pip install xxx
-conda run -n ExplicitLLM python -m pytest xxx #注意不能conda run -n ExplicitLLM pytest xxx，因为这样子pytest不会调用ExplicitLLM
+# 推荐执行方式
 conda run -n ExplicitLLM python xxx
-
-# 或者：在命令前激活环境
-source activate ExplicitLLM && xxx
+CUDA_VISIBLE_DEVICES=6 conda run -n ExplicitLLM python xxx
 ```
 
-### 2.2 代码质量检查
-```bash
-# 代码格式化
-conda run -n ExplicitLLM ruff format xxx
+### 2.2 常用命令
 
-# 代码检查并自动修复
+**训练**:
+```bash
+# Phase 2 Fusion
+MODEL_PATH=Qwen3-0.6B ENC_MODE=qwen3 NUM_GPUS=1 GPU_IDS=6 bash scripts/run_phase2_fusion.sh
+
+# Phase 3 SFT（依赖 Phase 2 checkpoint）
+MODEL_PATH=Qwen3-0.6B ENC_MODE=qwen3 FROM_PHASE2=checkpoints/p2_qwen3_10ep/phase2_best NUM_GPUS=1 GPU_IDS=6 bash scripts/run_phase3_sft.sh
+
+# Dense Phase 3
+MODEL_PATH=Qwen3-0.6B ENC_MODE=qwen3 FROM_PHASE2=... FROM_DENSE_INDEX=... KNOWLEDGE_SOURCE=dense_retriever NUM_GPUS=1 GPU_IDS=6 bash scripts/run_phase3_sft.sh
+```
+
+**推理**:
+```bash
+# Scheme2 推理
+bash scripts/run_scheme2_p1_p3_infer.sh --question "..." --option-a "..." --option-b "..." --option-c "..." --option-d "..."
+
+# Dense 检索推理
+CUDA_VISIBLE_DEVICES=6 conda run -n ExplicitLLM python scripts/run_dense_phase3_infer.py --config config/default.yaml ...
+```
+
+**实验**:
+```bash
+bash scripts/run_experiment_auto.sh <e1|e2|e3|e3_multik|e4|e5|e6|e7|e7_full>
+bash scripts/run_experiment_suite.sh  # 顺序运行 E1-E7
+```
+
+**评测与结果**:
+```bash
+conda run -n ExplicitLLM python scripts/collect_results.py  # 汇总所有实验结果
+```
+
+**代码质量**:
+```bash
+conda run -n ExplicitLLM ruff format xxx
 conda run -n ExplicitLLM ruff check xxx --fix
 ```
 
+**测试**:
+```bash
+conda run -n ExplicitLLM pytest tests/unit/ --cov=models --cov-report=term-missing
+conda run -n ExplicitLLM pytest tests/integration/
+conda run -n ExplicitLLM pytest tests/unit/test_injection_modules.py  # 单个测试
+```
 
-### 2.3 main.py CLI 入口（生产命令）
+### 2.3 main.py CLI 入口
 
-| 子命令 | 功能 | 前置模块 |
-|--------|------|----------|
-| `build-knowledge` | Phase 0 知识构建 | §1.2+§1.3+§1.5 |
-| `train --phase {0,1,2,3}` | 训练管线 | §1.7+§1.9+§1.10 |
-| `eval` | 评测入口 | §1.10 |
-| `answer` | 端到端 QA | §1.10 |
+`main.py` 是生产 CLI，子命令：`build-knowledge`、`train --phase {0,1,2,3}`、`eval`、`answer`
 
 用法：`conda run -n ExplicitLLM python main.py [--config path] [--device dev] [--override key=value ...] {子命令}`
 
-模块验证不在 main.py 中，统一通过 `tests/integration/` 执行。
+## 3. 架构
 
-## 3. 标准作业程序 (Standard Operating Procedure)
-> **Agent 必须严格遵守以下生命周期执行任务：**
+### 3.1 核心数据流
 
-### Phase 1: 规划与设计 (Planning)
-1. **查阅规格 (Read Specs)&讨论**: 在撰写计划前，**必须**仔细阅读 `docs/` 下对应的文档与`.report`下的项目整理架构，并使用GitNexus MCP来了解整个项目的最新情况。对于不理解的地方请与人类进行多轮讨论，确保理解人类的设计意图。
-2. **计划 (Plan)**: 正式编码前，**必须**使用plan模式输出开发计划，内容必须严格包含：
-   - **1.1 摘要 (Summary)**: 1-2句话的简单总结。
-   - **1.2 审查点 (User Review Required)**: 明确列出整个计划中不清楚、需要用户审查和确认的部分。若无，请注明"无"。
-   - **1.3 拟议变更 (Proposed Changes)**:
-     - 以 **文件名 + 修改内容** 的形式列出。
-     - 修改内容必须精确到 **函数/方法级别 (Function-level)**。
-     - 明确标识 `[NEW]`, `[MODIFY]`, `[DELETE]`。
-   - **1.4 验证计划 (Verification Plan)**: 具体描述如何验证修改是否成功（如具体的测试命令、预期日志输出等）。
-4. **等待 (Wait)**: **必须** 暂停并等待用户审核开发计划。用户批准后方可进入下一阶段。
-
-### Phase 2: 执行与验证 (Execution & Verification)
-1. **编码 (Coding)**: 审核通过后，开始编写代码。
-2. **验证 (Verify)**:
-   - **环境检查**: 确保所有命令在 ExplicitLLM 环境中执行（使用 `conda run -n ExplicitLLM`）
-   - **运行验证命令**:
-     - *失败*: 回到编码阶段修复，直到通过。
-     - *成功*: 进入下一步。
-
-## 4. 核心规则 (Rules)
-
-### 4.1 代码开发规范 (Code Style)
-- **类型系统**: 强制所有函数签名包含完整类型注解 (`Union`, `Dict`, `Optional` 等)。
-- **文档**: 所有模块、类、方法必须包含 **中文 Docstring** (功能、参数、返回值、关键实现细节)。
-- **MVP原则**:
-  - **必须** 必须在`tests/`目录下编写测试代码。
-  - **严禁** 使用默认参数掩盖仅需逻辑（必须显式传递关键参数）。
-  - **必需** 运行时检查：关键维度、设备一致性必须通过 assertion 或 if 验证。
-- **代码组织**:
-  - 使用阶段化注释 (`# Phase 1`, `# Phase 2`) 组织复杂逻辑。
-  - 接口返回值需包含完整诊断信息（输出、损失、统计），使用条件标志控制。
-- **命名与依赖**:
-  - 类名 `PascalCase`，变量描述性命名，私有变量前缀 `_`。
-  - 导入顺序：标准库 → 第三方库 → 项目内部。
-- **日志与错误处理**: 使用 `utils/logger_system.py` 的 `log_msg()`, `log_json()`, `ensure()`, `log_exception()`
-  - 禁用 `print()`，`log_msg("ERROR")` 不自动抛出异常，输出到 `logs/system.log` + `logs/metrics.json`
-- **功能修改**:
-  - **必须** 不考虑向后兼容，直接修改原文件。代码简洁性优先。
-
-### 4.2 配置管理规范
-- **优先级**: CLI args > `.env` > YAML，三者统一归口到 dataclass
-- **文件**: `config/default.yaml`（全量非敏感配置，必须写全）, `.env`（敏感信息，不提交）, `.env.example`（模板）
-
-### 4.3 测试组织规范
-- **目录**: `tests/{unit,integration,e2e}/test_*.py`，最低覆盖率 80%
-- **运行**: `conda run -n ExplicitLLM pytest tests/unit/ --cov=utils --cov-report=term-missing`
-
-#### Agent 测试输出规范
-
-> **main.py 是生产 CLI 入口**（build-knowledge / train / eval / answer），不含 demo 或验证逻辑。
-> 模块验证通过 `tests/integration/test_{module}_flow.py` + Markdown 报告完成。
-> 严禁在 main.py 中使用 MagicMock/玩具参数。
-
-| 要素 | 规范 |
-|------|------|
-| **输出位置** | `tests/outputs/<test_module>/<test_name>_<timestamp>.md` |
-| **触发时机** | 所有涉及 Agent 执行的测试 |
-| **内容要求** | 任务描述、每步 Agent 输入/输出/推理过程、工具调用、最终结果 |
-| **格式要求** | 结构化 Markdown（标题、代码块、列表），人类可读 |
-| **分析方式** | Claude Code 读取 MD 文件，评估推理质量、任务完成度、代码正确性 |
-
-**示例结构**:
-```markdown
-# Agent 测试: <test_name>
-## 任务: <task>
-## Step 1: <AgentName>
-- 输入: ...
-- 输出: ...
-- 推理: ...
-## Step 2: ...
-## 最终结果: ...
+```
+用户输入 → DenseRetriever(dense向量检索) → 知识检索
+         → KnowledgeEncoder(双向编码) → 知识向量
+         → ModifiedQwen(hook注入4层) → 生成回答
 ```
 
-**pytest 集成**: 使用 fixture 或工具类自动保存，测试结束后输出文件路径。
+### 3.2 模块职责
 
+| 模块 | 核心类 | 职责 |
+|------|--------|------|
+| `models/qwen_wrapper.py` | `KnowledgeEncoder` | Qwen3 前 N 层 + 双向 attention 编码知识 |
+| `models/modified_model.py` | `ModifiedQwen` | 冻结 Qwen3 + 在 [6,12,18,24] 层注册 hook 注入知识 |
+| `models/injection_modules.py` | `AttentionInjection` | Cross-Attention + Null KV + zero-init 残差（主方法） |
+| `router/model.py` | `MemoryRouter` | PKM 粗排 + RefinedSelector 精排的完整路由器 |
+| `router/memory_bank.py` | `DualKnowledgeStore` | FusionBank[压缩事实,64tok] + AnchorBank[原文,128tok] |
+| `router/memory_gate.py` | `ProductKeyMemory` | 二维 √N×√N 网格粗排，~256 候选 |
+| `router/clustering.py` | `SubspaceClustering` | PCA 去相关 + 平衡递归二分 |
+| `router/refined_selector.py` | `RefinedSelector` | 2 层 Transformer cross-encoder 精排 |
+| `retrieval/dense_index.py` | `DenseKnowledgeIndex` | Dense 检索索引（Flat/HNSW 后端） |
+| `pipeline.py` | `ExplicitLMPipeline` | 端到端：检索 → 编码 → 生成 |
 
-## 5. 上下文获取与迷途指南 (Context & Navigation)
-！注意 `Reference` 文件夹下的所有代码和文件都来自于参考项目，不是本项目的代码。
+### 3.3 知识双库设计
 
-| 需求 | 文档路径 | 说明 |
-|------|----------|------|
-| 项目目标与背景 | `README.md` | 核心业务逻辑与项目定性 |
-| 架构与模块设计 | `.report/CODEMAPS/{architecture,backend,data}.md` | 整体架构、分层设计、模块依赖 |
-| 该项目最主要的参考项目 | `Reference/Tree-TRM`| 特定模块的详细设计 |
-| 其他参考项目 | `Reference/PageIndex_ Next-Generation Vectorless, Reasoning-based RAG.md`和 `Reference/Tree-TRM`|  |
-| 模块构建状态 | `docs/TD.md` 各 §1.x 节顶部 | 实现状态、依赖、验证 checkpoint |
+- **FusionBank** `[N, 64]`: LLMLingua 压缩后的知识，用于注入 LLM
+- **AnchorBank** `[N, 128]`: 截断原文，用于路由和聚类
+- 支持动态增删、compact + recluster
 
-## 6. 输出规范
+### 3.4 注入机制
 
-### 6.1 语言要求
-- 所有输出语言: **中文**
+在冻结 Qwen3 的第 6, 12, 18, 24 层注册 forward hook，通过 `AttentionInjection`（Cross-Attention）将编码后的知识与 hidden states 交互。zero-init 的 output projection 确保未训练时退化为原始模型。
 
-### 6.2 信息密度原则
-- **优先使用**:
-  - 简洁文本描述
-  - 伪代码（而非完整代码）
-  - 表格（对比、配置、参数说明）
-  - 流程图（Mermaid）
-  - 项目符号列表
-- **避免使用**:
-  - 大段完整代码（信息密度低，可读性差）
-  - 冗长的自然语言解释
-- **核心原则**: 用最少的字符传递最多的信息
-`
+## 4. 配置
 
-<!-- gitnexus:start -->
-# GitNexus MCP
+**优先级**: CLI args > `.env` > `config/default.yaml`，统一归口到 `config.py` 中的 dataclass。
 
-This project is indexed by GitNexus as **Explicit-Lora** (1960 symbols, 4034 relationships, 116 execution flows).
+关键配置项（`config/default.yaml`）:
+- 模型: hidden_dim=1024, 28 层, 注入层 [6,12,18,24], fusion_encoder_depth=6
+- 路由: 1M 知识条目, 256 候选, adapter_dim=512
+- 训练: Phase1 lr=5e-4/72batch/20ep, Phase2 lr=3e-4/32batch/10ep, Phase3 lr=1e-4/16batch/10ep
+- 编码模式: `qwen3`（推荐）或 `trainable`
 
-## Always Start Here
+## 5. 开发规范
 
-1. **Read `gitnexus://repo/{name}/context`** — codebase overview + check index freshness
-2. **Match your task to a skill below** and **read that skill file**
-3. **Follow the skill's workflow and checklist**
+### 5.1 工作流程
 
-> If step 1 warns the index is stale, run `npx gitnexus analyze` in the terminal first.
+1. **规划**: 阅读 `docs/` 下对应文档，理解设计意图，与用户讨论不明确之处
+2. **计划**: 使用 plan 模式输出开发计划（摘要 → 审查点 → 变更列表 → 验证计划）
+3. **等待用户批准**
+4. **编码与验证**: 编码后运行测试确认通过
 
-## Skills
+### 5.2 代码风格
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+- 函数签名必须包含完整类型注解
+- 所有模块/类/方法必须有**中文 Docstring**
+- 使用阶段化注释（`# Phase 1`, `# Phase 2`）组织复杂逻辑
+- 类名 `PascalCase`，私有变量前缀 `_`
+- 导入顺序：标准库 → 第三方库 → 项目内部
+- **不考虑向后兼容**，直接修改原文件
+- 禁用 `print()`，使用 `log_msg()` / `log_json()` / `ensure()`
 
-<!-- gitnexus:end -->
+### 5.3 测试
+
+- 目录: `tests/unit/` 和 `tests/integration/`
+- Agent 测试输出: `tests/outputs/<test_module>/<test_name>_<timestamp>.md`（结构化 Markdown）
+- 严禁在 `main.py` 中使用 MagicMock/玩具参数
+
+## 6. 上下文获取
+
+> 注意 `Reference/` 下的代码来自参考项目，不是本项目代码。
+
+| 需求 | 文档路径 |
+|------|----------|
+| 项目背景与使用说明 | `README.md` |
+| 系统架构设计 | `docs/architecture.md` |
+| 技术设计文档（模块规格） | `docs/TD.md` |
+| 实验计划 | `docs/experiment_plan.md` |
+| 参考项目（最主要） | `Reference/Tree-TRM/` |
+
+## 7. GitNexus MCP
+
+本项目由 GitNexus 索引为 **Explicit-Lora**。使用前先读 `gitnexus://repo/Explicit-Lora/context` 检查索引新鲜度。
+
+| 任务 | 技能文件 |
+|------|----------|
+| 理解架构 | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| 影响分析 | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| 调试追踪 | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| 重构 | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
