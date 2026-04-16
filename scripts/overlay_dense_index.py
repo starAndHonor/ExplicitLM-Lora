@@ -303,13 +303,29 @@ def main() -> None:
         if not args.input:
             raise ValueError("either --input or dual-source inputs are required")
         rows_raw = _load_rows(Path(args.input), args.limit)
-        rows = _materialize_rows(rows_raw, tokenizer, fallback_to_key=True)
-        keys = [row["key"] for row in rows]
-        texts = [row["text"] for row in rows]
-        compressed = [row["compressed_text"] for row in rows]
-        fusion_ids, _ = _tokenize_texts(compressed, tokenizer, cfg.model.fusion_length, args.tokenize_batch_size)
+        keys = [str(r["key"]) for r in rows_raw]
+        pad_id = tokenizer.pad_token_id
 
-    anchor_ids, anchor_mask = _tokenize_texts(texts, tokenizer, cfg.model.anchor_length, args.tokenize_batch_size)
+        # 若文件含 knowledge_ids，直接用；否则 tokenize compressed/text
+        if rows_raw and rows_raw[0].get("knowledge_ids") is not None:
+            logger.info("Input has knowledge_ids — using directly as fusion_ids")
+            fusion_ids = torch.full((len(rows_raw), cfg.model.fusion_length), pad_id, dtype=torch.long)
+            decoded_texts: List[str] = []
+            for idx, r in enumerate(rows_raw):
+                ids = list(r["knowledge_ids"])[: cfg.model.fusion_length]
+                fusion_ids[idx, : len(ids)] = torch.tensor(ids, dtype=torch.long)
+                valid = [x for x in ids if x != pad_id]
+                decoded_texts.append(tokenizer.decode(valid, skip_special_tokens=True).strip())
+            compressed = decoded_texts
+            texts = decoded_texts
+        else:
+            rows = _materialize_rows(rows_raw, tokenizer, fallback_to_key=True)
+            texts = [row["text"] for row in rows]
+            compressed = [row["compressed_text"] for row in rows]
+            fusion_ids, _ = _tokenize_texts(compressed, tokenizer, cfg.model.fusion_length, args.tokenize_batch_size)
+
+    # 单视图：用 decoded/compressed 文本编码 embedding
+    encode_ids, encode_mask = _tokenize_texts(compressed, tokenizer, cfg.model.fusion_length, args.tokenize_batch_size)
     base_model = load_base_model(model_path, bf16=cfg.train.bf16 and args.device != "cpu")
     encoder = KnowledgeEncoder(
         base_model=base_model,
@@ -319,7 +335,7 @@ def main() -> None:
     )
     encoder.requires_grad_(False)
     encoder = encoder.to(args.device).eval()
-    embeddings = _encode_embeddings(encoder, anchor_ids, anchor_mask, args.batch_size)
+    embeddings = _encode_embeddings(encoder, encode_ids, encode_mask, args.batch_size)
 
     n_new = len(keys)
     if n_new > target_size:

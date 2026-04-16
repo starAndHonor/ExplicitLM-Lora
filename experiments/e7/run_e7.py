@@ -91,15 +91,15 @@ def _resolve(path_str: str) -> str:
 def _default_e5_sources() -> dict[str, dict[str, str]]:
     return {
         "medqa": {
-            "anchor": str((PROJECT_ROOT / "data/medqa_knowledge_original_text.jsonl").resolve()),
+            "anchor": str((PROJECT_ROOT / "data/medqa_knowledge.jsonl").resolve()),
             "fusion": str((PROJECT_ROOT / "data/medqa_knowledge.jsonl").resolve()),
         },
         "arc": {
-            "anchor": str((PROJECT_ROOT / "data/arc_knowledge_original_text.jsonl").resolve()),
+            "anchor": str((PROJECT_ROOT / "data/arc_knowledge.jsonl").resolve()),
             "fusion": str((PROJECT_ROOT / "data/arc_knowledge.jsonl").resolve()),
         },
         "mmlu": {
-            "anchor": str((PROJECT_ROOT / "data/mmlu_knowledge_original_text.jsonl").resolve()),
+            "anchor": str((PROJECT_ROOT / "data/mmlu_knowledge.jsonl").resolve()),
             "fusion": str((PROJECT_ROOT / "data/mmlu_knowledge.jsonl").resolve()),
         },
     }

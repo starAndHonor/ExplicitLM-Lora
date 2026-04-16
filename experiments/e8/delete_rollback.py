@@ -36,12 +36,10 @@ def run_e8b_delete_rollback(
     init_logging()
     device_obj = torch.device(device)
 
-    original_text_path = resolve_path("data/medqa_knowledge_original_text.jsonl")
-    knowledge_map_path = resolve_path(cfg.eval.medqa_knowledge_map)
     full_index_path_resolved = resolve_path(full_index_path)
     phase3_weights_resolved = resolve_path(phase3_weights)
 
-    knowledge_entries = load_medqa_knowledge_entries(original_text_path, knowledge_map_path)
+    knowledge_entries = load_medqa_knowledge_entries(cfg.model.fusion_length)
     edit_rows = select_edit_rows(limit=n_edits, seed=seed, knowledge_entries=knowledge_entries)
     edit_keys = [row["key"] for row in edit_rows]
 
@@ -58,10 +56,8 @@ def run_e8b_delete_rollback(
         phase3_tokenizer,
         full_retriever,
         edit_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     deleted_index = DenseKnowledgeIndex.load(full_index_path_resolved)
@@ -82,10 +78,8 @@ def run_e8b_delete_rollback(
         phase3_tokenizer,
         deleted_retriever,
         edit_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     encoder, encoding_tokenizer = build_fusion_encoder_and_tokenizer(cfg, device=device_obj)
@@ -127,10 +121,8 @@ def run_e8b_delete_rollback(
         phase3_tokenizer,
         restored_retriever,
         edit_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     before_qa_flags = before_eval["qa_correct_flags"]

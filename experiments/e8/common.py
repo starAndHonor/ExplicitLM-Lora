@@ -40,35 +40,24 @@ def resolve_path(path_str: str) -> Path:
 
 
 def load_medqa_knowledge_entries(
-    original_text_path: str | Path,
-    knowledge_map_path: str | Path,
+    fusion_length: int,
 ) -> Dict[str, MedQAKnowledgeEntry]:
-    original_path = resolve_path(str(original_text_path))
-    knowledge_path = resolve_path(str(knowledge_map_path))
-
-    original_map: Dict[str, str] = {}
-    with original_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            original_map[str(obj["key"])] = str(obj["original_text"])
-
+    """从 k-specific knowledge jsonl 加载 MedQA knowledge 条目（single-view）。"""
+    path = _medqa_knowledge_path(fusion_length)
     entries: Dict[str, MedQAKnowledgeEntry] = {}
-    with knowledge_path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
             key = str(obj["key"])
-            if key not in original_map:
-                continue
+            knowledge_ids = [int(x) for x in obj["knowledge_ids"]]
+            original_text = str(obj.get("text") or obj.get("original_text") or "")
             entries[key] = MedQAKnowledgeEntry(
                 key=key,
-                original_text=original_map[key],
-                knowledge_ids=[int(x) for x in obj["knowledge_ids"]],
+                original_text=original_text,
+                knowledge_ids=knowledge_ids,
             )
     return entries
 
@@ -251,42 +240,30 @@ def save_temp_index(index: DenseKnowledgeIndex, prefix: str) -> Path:
     return out_path
 
 
-def _load_medqa_anchor_rows(anchor_variant: str) -> List[Dict[str, str]]:
-    if anchor_variant == "original_text":
-        path = resolve_path("data/medqa_knowledge_original_text.jsonl")
-        rows: List[Dict[str, str]] = []
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                obj = json.loads(line)
-                rows.append(
-                    {
-                        "key": str(obj["key"]),
-                        "text": str(obj["original_text"]).strip(),
-                    }
-                )
-        return rows
+def _medqa_knowledge_path(fusion_length: int) -> Path:
+    """根据 fusion_length 返回对应的预处理知识文件路径。"""
+    if fusion_length == 64:
+        return resolve_path("data/medqa_knowledge.jsonl")
+    return resolve_path(f"data/medqa_knowledge_k{fusion_length}.jsonl")
 
-    if anchor_variant == "k256":
-        path = resolve_path("data/medqa_knowledge_k256.jsonl")
-        rows = []
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                obj = json.loads(line)
-                rows.append(
-                    {
-                        "key": str(obj["key"]),
-                        "knowledge_ids": [int(x) for x in obj["knowledge_ids"]],
-                    }
-                )
-        return rows
 
-    raise ValueError(f"unsupported MedQA anchor variant: {anchor_variant}")
+def _load_medqa_knowledge_rows(fusion_length: int) -> List[Dict[str, object]]:
+    """加载对应 k-size 的 MedQA knowledge 文件（含 knowledge_ids）。"""
+    path = _medqa_knowledge_path(fusion_length)
+    rows: List[Dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            rows.append(
+                {
+                    "key": str(obj["key"]),
+                    "knowledge_ids": [int(x) for x in obj["knowledge_ids"]],
+                }
+            )
+    return rows
 
 
 def build_medqa_overlay_index(
@@ -294,61 +271,46 @@ def build_medqa_overlay_index(
     base_index_path: str | Path,
     device: torch.device | str,
     *,
-    anchor_variant: str = "original_text",
     overlay_seed: int = 42,
 ) -> Tuple[Path, int]:
-    """Build a temporary MedQA overlay index on top of a FineWeb base index."""
-
+    """构建临时 MedQA overlay 索引（单视图，fusion_length 由 cfg.model.fusion_length 控制）。"""
     base_index_resolved = resolve_path(str(base_index_path))
     dense_index = DenseKnowledgeIndex.load(base_index_resolved)
     target_size = len(dense_index)
     logger.info(
-        "[E8] Building MedQA overlay index | base=%s | total=%d | active=%d | variant=%s | seed=%d",
+        "[E8] Building MedQA overlay index | base=%s | total=%d | fusion_length=%d | knowledge_path=%s | seed=%d",
         base_index_resolved,
         len(dense_index),
-        dense_index.num_active,
-        anchor_variant,
+        cfg.model.fusion_length,
+        _medqa_knowledge_path(cfg.model.fusion_length),
         overlay_seed,
     )
 
-    knowledge_entries = load_medqa_knowledge_entries(
-        original_text_path=resolve_path("data/medqa_knowledge_original_text.jsonl"),
-        knowledge_map_path=resolve_path(cfg.eval.medqa_knowledge_map),
-    )
-    anchor_rows = _load_medqa_anchor_rows(anchor_variant)
-    filtered_rows = [row for row in anchor_rows if row["key"] in knowledge_entries]
-    if not filtered_rows:
-        raise ValueError(f"no MedQA rows loaded for anchor variant {anchor_variant}")
+    knowledge_rows = _load_medqa_knowledge_rows(cfg.model.fusion_length)
+    if not knowledge_rows:
+        raise ValueError(f"no MedQA knowledge rows loaded for fusion_length={cfg.model.fusion_length}")
 
     encoder, tokenizer = build_fusion_encoder_and_tokenizer(cfg, device=device)
-    texts: List[str] = []
+    pad_token_id = tokenizer.pad_token_id
+
     keys: List[str] = []
-    fusion_ids_rows: List[List[int]] = []
-    for row in filtered_rows:
-        key = row["key"]
-        keys.append(key)
-        # 单视图：embedding 来自 compressed knowledge_ids（与注入同源）
-        compressed = get_compressed_text(knowledge_entries[key], tokenizer)
-        texts.append(compressed)
-        fusion_ids_rows.append(knowledge_entries[key].knowledge_ids)
+    texts: List[str] = []
+    fusion_ids_list: List[List[int]] = []
+    for row in knowledge_rows:
+        keys.append(str(row["key"]))
+        # 解码 knowledge_ids 作为 embedding 输入文本
+        valid_ids = [x for x in row["knowledge_ids"] if x != pad_token_id]
+        texts.append(tokenizer.decode(valid_ids, skip_special_tokens=True).strip())
+        fusion_ids_list.append(list(row["knowledge_ids"]))
 
     if len(keys) > target_size:
         raise ValueError(f"overlay docs {len(keys)} exceed index size {target_size}")
 
-    embeddings = encode_fusion_texts(
-        cfg=cfg,
-        encoder=encoder,
-        tokenizer=tokenizer,
-        texts=texts,
-        device=device,
-    )
-    pad_token_id = tokenizer.pad_token_id
+    embeddings = encode_fusion_texts(cfg=cfg, encoder=encoder, tokenizer=tokenizer, texts=texts, device=device)
     fusion_ids = torch.full((len(keys), cfg.model.fusion_length), pad_token_id, dtype=torch.long)
-    for idx, token_ids in enumerate(fusion_ids_rows):
-        cur = list(token_ids[: cfg.model.fusion_length])
-        if len(cur) < cfg.model.fusion_length:
-            cur.extend([pad_token_id] * (cfg.model.fusion_length - len(cur)))
-        fusion_ids[idx] = torch.tensor(cur, dtype=torch.long)
+    for idx, ids in enumerate(fusion_ids_list):
+        cur = ids[: cfg.model.fusion_length]
+        fusion_ids[idx, : len(cur)] = torch.tensor(cur, dtype=torch.long)
 
     generator = torch.Generator().manual_seed(overlay_seed)
     replace_positions = torch.randperm(target_size, generator=generator).tolist()[: len(keys)]
@@ -365,13 +327,8 @@ def build_medqa_overlay_index(
     if len(dense_index) != target_size:
         raise RuntimeError(f"overlay size mismatch: expected {target_size}, got {len(dense_index)}")
 
-    out_path = save_temp_index(dense_index, prefix=f"e8_medqa_overlay_{anchor_variant}")
-    logger.info(
-        "[E8] MedQA overlay index ready | output=%s | replaced=%d | deleted=%d",
-        out_path,
-        len(old_keys),
-        deleted,
-    )
+    out_path = save_temp_index(dense_index, prefix="e8_medqa_overlay")
+    logger.info("[E8] MedQA overlay index ready | output=%s | replaced=%d | deleted=%d", out_path, len(old_keys), deleted)
     return out_path, deleted
 
 
@@ -382,7 +339,6 @@ def prepare_medqa_full_index(
     full_index_path: str | None,
     base_index_path: str | None,
     device: torch.device | str,
-    anchor_variant: str = "original_text",
     overlay_seed: int = 42,
 ) -> Dict[str, Any]:
     if memory_setting == "controlled":
@@ -393,7 +349,7 @@ def prepare_medqa_full_index(
             "memory_setting": memory_setting,
             "full_index_path": str(resolved),
             "source_index_path": str(resolved),
-            "anchor_variant": anchor_variant,
+            "fusion_length": cfg.model.fusion_length,
             "overlay_seed": overlay_seed,
             "overlay_deleted": 0,
         }
@@ -405,14 +361,13 @@ def prepare_medqa_full_index(
             cfg=cfg,
             base_index_path=base_index_path,
             device=device,
-            anchor_variant=anchor_variant,
             overlay_seed=overlay_seed,
         )
         return {
             "memory_setting": memory_setting,
             "full_index_path": str(overlay_path),
             "source_index_path": str(resolve_path(base_index_path)),
-            "anchor_variant": anchor_variant,
+            "fusion_length": cfg.model.fusion_length,
             "overlay_seed": overlay_seed,
             "overlay_deleted": deleted,
         }
@@ -423,23 +378,19 @@ def prepare_medqa_full_index(
 def compute_retrieval_top1_exact(
     retriever: DenseRetriever,
     rows: Sequence[Dict[str, Any]],
-    knowledge_entries: Dict[str, MedQAKnowledgeEntry],
     query_mode: str,
-    pad_token_id: int,
-    fusion_length: int,
 ) -> float:
+    """按 key 匹配计算 top-1 检索正确率（单视图模式）。"""
     if not rows:
         return 0.0
     correct = 0
     for row in rows:
         query = build_retrieval_query(row, query_mode)
-        pred = retriever.retrieve_from_texts([query])[0].detach().cpu().tolist()
-        gold = _pad_knowledge_ids(
-            knowledge_entries[row["key"]].knowledge_ids,
-            fusion_length=fusion_length,
-            pad_token_id=pad_token_id,
-        )
-        if pred == gold:
+        search = retriever.search_from_texts([query], top_k=1)
+        idx = int(search.indices[0][0].item())
+        valid = bool(search.valid_mask[0][0].item())
+        pred_key = retriever.index.keys[idx] if valid and idx >= 0 else ""
+        if pred_key == str(row["key"]):
             correct += 1
     return correct / len(rows)
 
@@ -472,27 +423,25 @@ def evaluate_edit_rows(
     tokenizer: AutoTokenizer,
     retriever: DenseRetriever,
     rows: Sequence[Dict[str, Any]],
-    knowledge_entries: Dict[str, MedQAKnowledgeEntry],
     device: torch.device,
     query_mode: str,
-    fusion_length: int,
 ) -> Dict[str, Any]:
+    """评测编辑行的 QA 准确率和 top-1 检索正确率（key 匹配，单视图模式）。"""
     qa_correct_flags: List[bool] = []
     retrieval_exact_flags: List[bool] = []
-    pad_token_id = tokenizer.pad_token_id
 
     with torch.no_grad():
         for row in rows:
             retrieval_query = build_retrieval_query(row, query_mode)
-            knowledge_ids = retriever.retrieve_from_texts([retrieval_query])
-            pred_knowledge = knowledge_ids[0].detach().cpu().tolist()
-            gold_knowledge = _pad_knowledge_ids(
-                knowledge_entries[row["key"]].knowledge_ids,
-                fusion_length=fusion_length,
-                pad_token_id=pad_token_id,
-            )
-            retrieval_exact_flags.append(pred_knowledge == gold_knowledge)
+            # key 匹配检索正确率
+            search = retriever.search_from_texts([retrieval_query], top_k=1)
+            idx = int(search.indices[0][0].item())
+            valid = bool(search.valid_mask[0][0].item())
+            pred_key = retriever.index.keys[idx] if valid and idx >= 0 else ""
+            retrieval_exact_flags.append(pred_key == str(row["key"]))
 
+            # QA 准确率：取 top-1 fusion_ids 注入
+            knowledge_ids = retriever.retrieve_from_texts([retrieval_query])
             prompt = build_multiple_choice_prompt(row["question"], row["choices"])
             context_ids = tokenizer.encode(prompt, add_special_tokens=False)
             pred = score_choices_injection(model, tokenizer, context_ids, knowledge_ids, device)

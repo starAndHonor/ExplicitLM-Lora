@@ -15,9 +15,9 @@
 #     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment.sh e3
 #   DRY_RUN=1 bash scripts/run_experiment.sh e6
-#   DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
-#     DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_original_text_flat_r24_qwen3.pt \
-#     DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_original_text_flat_r24_qwen3.pt \
+#   DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_k64_flat_r0_qwen3.pt \
+#     DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_k64_flat_r0_qwen3.pt \
+#     DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_k64_flat_r0_qwen3.pt \
 #     TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment.sh e7
 #   TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
@@ -51,6 +51,7 @@ N_MEASURE="${N_MEASURE:-200}"
 E3_RESULT="${E3_RESULT:-}"
 E5_RESULT="${E5_RESULT:-}"
 TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS:-${PHASE3_WEIGHTS}}"
+K_SIZE="${K_SIZE:-64}"
 DENSE_INDEX_MEDQA="${DENSE_INDEX_MEDQA:-}"
 DENSE_INDEX_ARC="${DENSE_INDEX_ARC:-}"
 DENSE_INDEX_MMLU="${DENSE_INDEX_MMLU:-}"
@@ -245,10 +246,6 @@ case "${EXPERIMENT}" in
         fi
         ;;
     e7)
-        if [ -z "${DENSE_INDEX_MEDQA}" ] || [ -z "${DENSE_INDEX_ARC}" ] || [ -z "${DENSE_INDEX_MMLU}" ]; then
-            echo "[Experiment] ERROR: e7 需要设置 DENSE_INDEX_MEDQA / DENSE_INDEX_ARC / DENSE_INDEX_MMLU"
-            exit 1
-        fi
         CMD=(
             env
             CONFIG="${CONFIG}"
@@ -256,12 +253,13 @@ case "${EXPERIMENT}" in
             DEVICE="${DEVICE}"
             ENC_MODE="${ENC_MODE}"
             MAX_SAMPLES="${MAX_SAMPLES}"
-            DENSE_INDEX_MEDQA="${DENSE_INDEX_MEDQA}"
-            DENSE_INDEX_ARC="${DENSE_INDEX_ARC}"
-            DENSE_INDEX_MMLU="${DENSE_INDEX_MMLU}"
+            K_SIZE="${K_SIZE}"
             TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}"
             QUERY_MODE="${QUERY_MODE}"
         )
+        if [ -n "${DENSE_INDEX_MEDQA}" ]; then CMD+=(DENSE_INDEX_MEDQA="${DENSE_INDEX_MEDQA}"); fi
+        if [ -n "${DENSE_INDEX_ARC}" ];   then CMD+=(DENSE_INDEX_ARC="${DENSE_INDEX_ARC}");     fi
+        if [ -n "${DENSE_INDEX_MMLU}" ];  then CMD+=(DENSE_INDEX_MMLU="${DENSE_INDEX_MMLU}");   fi
         if [ -n "${OUTPUT}" ]; then
             CMD+=(OUTPUT="${OUTPUT}")
         fi

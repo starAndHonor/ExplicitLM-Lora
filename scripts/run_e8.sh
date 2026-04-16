@@ -2,43 +2,22 @@
 # 运行 E8 Editable Memory Benchmark
 #
 # 用法：
-#   FULL_INDEX=checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
 #   PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #   bash scripts/run_e8.sh e8a
 #
-#   FULL_INDEX=checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
 #   PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
-#   GPU_IDS=2 \
-#   N_EDITS=100 \
+#   GPU_IDS=2 N_EDITS=100 \
 #   bash scripts/run_e8.sh e8b
 #
-#   BASE_INDEX=checkpoints/dense_fineweb_1m_flat_r24_qwen3.pt \
-#   PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
-#   GPU_IDS=2 \
 #   MEMORY_SETTING=overlay_1m \
-#   ANCHOR_VARIANT=original_text \
-#   STEPS=1,2,3,10,11,12,100,101,102 \
-#   LOCALITY_SAMPLES=200 \
+#   PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#   STEPS=1,2,3,10,11,12,100,101,102 LOCALITY_SAMPLES=200 \
 #   bash scripts/run_e8.sh e8c
 #
-#   BASE_INDEX=checkpoints/dense_fineweb_1m_flat_r24_qwen3.pt \
+#   K_SIZE=128 MEMORY_SETTING=overlay_1m \
 #   PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
-#   GPU_IDS=2 \
-#   MEMORY_SETTING=overlay_1m \
-#   ANCHOR_VARIANT=k256 \
-#   N_EDITS=100 \
-#   LOCALITY_SAMPLES=200 \
+#   N_EDITS=100 LOCALITY_SAMPLES=200 \
 #   bash scripts/run_e8.sh e8d_a
-#
-#   BASE_INDEX=checkpoints/dense_fineweb_1m_flat_r24_qwen3.pt \
-#   PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
-#   GPU_IDS=2 \
-#   MEMORY_SETTING=overlay_1m \
-#   ANCHOR_VARIANT=k256 \
-#   N_EDITS=100 \
-#   UPDATE_BATCH_SIZE=10 \
-#   LOCALITY_SAMPLES=200 \
-#   bash scripts/run_e8.sh e8d_b
 
 set -euo pipefail
 
@@ -66,12 +45,12 @@ STEPS="${STEPS:-1,2,3,10,11,12,100,101,102}"
 LOCALITY_SAMPLES="${LOCALITY_SAMPLES:-200}"
 UPDATE_BATCH_SIZE="${UPDATE_BATCH_SIZE:-10}"
 MEMORY_SETTING="${MEMORY_SETTING:-controlled}"
-ANCHOR_VARIANT="${ANCHOR_VARIANT:-original_text}"
+K_SIZE="${K_SIZE:-64}"
 OVERLAY_SEED="${OVERLAY_SEED:-42}"
 DRY_RUN="${DRY_RUN:-0}"
 
-FULL_INDEX="${FULL_INDEX:-}"
-BASE_INDEX="${BASE_INDEX:-}"
+FULL_INDEX="${FULL_INDEX:-checkpoints/dense_fineweb_medqa_overlay_k${K_SIZE}_flat_r0_qwen3.pt}"
+BASE_INDEX="${BASE_INDEX:-checkpoints/dense_fineweb_1m_flat_r0_qwen3_fv.pt}"
 PHASE3_WEIGHTS="${PHASE3_WEIGHTS:-checkpoints/p3_from_p2_qwen3_10ep/phase3_best}"
 
 case "${MEMORY_SETTING}" in
@@ -94,10 +73,7 @@ case "${MEMORY_SETTING}" in
 esac
 
 if [ -z "${OUTPUT:-}" ]; then
-    RESULT_TAG="${MEMORY_SETTING}"
-    if [ "${MEMORY_SETTING}" = "overlay_1m" ]; then
-        RESULT_TAG="${RESULT_TAG}_${ANCHOR_VARIANT}"
-    fi
+    RESULT_TAG="${MEMORY_SETTING}_k${K_SIZE}"
     case "${EXPERIMENT}" in
         e8a)
             OUTPUT="${PROJECT_ROOT}/results/e8/e8a_upsert_${RESULT_TAG}_$(exp_ckpt_tag "${PHASE3_WEIGHTS}").json"
@@ -148,7 +124,7 @@ fi
 if [ -n "${BASE_INDEX}" ]; then
     CMD+=(--base-index "${BASE_INDEX}")
 fi
-CMD+=(--anchor-variant "${ANCHOR_VARIANT}" --overlay-seed "${OVERLAY_SEED}")
+CMD+=(--overlay-seed "${OVERLAY_SEED}" --override "model.fusion_length=${K_SIZE}")
 
 case "${EXPERIMENT}" in
     e8a|e8b)
@@ -181,7 +157,7 @@ echo "[E8] enc_mode=${ENC_MODE}"
 echo "[E8] memory_setting=${MEMORY_SETTING}"
 echo "[E8] full_index=${FULL_INDEX:-<auto>}"
 echo "[E8] base_index=${BASE_INDEX:-<none>}"
-echo "[E8] anchor_variant=${ANCHOR_VARIANT}"
+echo "[E8] k_size=${K_SIZE}"
 echo "[E8] overlay_seed=${OVERLAY_SEED}"
 echo "[E8] phase3_weights=${PHASE3_WEIGHTS}"
 echo "[E8] query_mode=${QUERY_MODE}"

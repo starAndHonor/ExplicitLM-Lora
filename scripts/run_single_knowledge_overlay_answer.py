@@ -106,16 +106,14 @@ def _parse_overrides(overrides: List[str] | None) -> Dict[str, Any]:
     return result
 
 
-def _dataset_original_text_path(dataset: str) -> Path:
-    mapping = {
-        "medqa": resolve_path("data/medqa_knowledge_original_text.jsonl"),
-        "arc": resolve_path("data/arc_knowledge_original_text.jsonl"),
-        "mmlu": resolve_path("data/mmlu_knowledge_original_text.jsonl"),
-    }
-    return mapping[dataset]
+def _dataset_knowledge_path(dataset: str, fusion_length: int) -> Path:
+    if fusion_length == 64:
+        return resolve_path(f"data/{dataset}_knowledge.jsonl")
+    return resolve_path(f"data/{dataset}_knowledge_k{fusion_length}.jsonl")
 
 
 def _load_original_knowledge_map(path: Path) -> Dict[str, str]:
+    """从 k-specific knowledge.jsonl 读取 text/original_text 字段作为原文映射。"""
     result: Dict[str, str] = {}
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -123,7 +121,8 @@ def _load_original_knowledge_map(path: Path) -> Dict[str, str]:
             if not line:
                 continue
             obj = json.loads(line)
-            result[str(obj["key"])] = str(obj["original_text"]).strip()
+            text = obj.get("text") or obj.get("original_text") or ""
+            result[str(obj["key"])] = str(text).strip()
     return result
 
 
@@ -187,6 +186,7 @@ def _choice_label(index: int) -> str:
 def _resolve_source_knowledge(
     dataset: str,
     *,
+    fusion_length: int,
     target_question: str,
     source_key: str,
     source_question: str,
@@ -202,7 +202,7 @@ def _resolve_source_knowledge(
     if not resolved_key:
         resolved_key = target_question[:200].strip()
 
-    original_map = _load_original_knowledge_map(_dataset_original_text_path(dataset))
+    original_map = _load_original_knowledge_map(_dataset_knowledge_path(dataset, fusion_length))
     if resolved_key in original_map:
         full_text = original_map[resolved_key]
         if no_answer:
@@ -229,6 +229,7 @@ def main() -> None:
 
     source_key, original_knowledge = _resolve_source_knowledge(
         args.dataset,
+        fusion_length=cfg.model.fusion_length,
         target_question=args.question,
         source_key=args.source_key,
         source_question=args.source_question,

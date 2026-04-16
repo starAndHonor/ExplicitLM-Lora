@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 import torch
 
@@ -13,10 +14,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import load_config
-from experiments.e2.common import load_knowledge_map
 from experiments.e2.scoring import build_multiple_choice_prompt
 from experiments.e3.data_loading import load_arc_rows, load_medqa_rows, load_mmlu_rows
 from training.dense_retriever import DenseRetriever
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -65,10 +67,6 @@ def _parse_overrides(overrides: list[str] | None) -> dict[str, Any]:
     return result
 
 
-def _trim_pad(ids: List[int], pad_token_id: int) -> List[int]:
-    return [x for x in ids if x != pad_token_id]
-
-
 def _build_query(row: Dict[str, Any], mode: str) -> str:
     if mode == "question_only":
         return str(row["question"])
@@ -87,8 +85,23 @@ def _load_rows(dataset: str, limit: int) -> List[Dict[str, Any]]:
     raise ValueError(f"unsupported dataset: {dataset}")
 
 
-def _gold_map_path(dataset: str) -> str:
-    return str(PROJECT_ROOT / "data" / f"{dataset}_knowledge.jsonl")
+def _load_indexed_keys(dataset: str, fusion_length: int) -> Set[str]:
+    """从 k-specific knowledge.jsonl 加载已注入索引的 key 集合。"""
+    if fusion_length == 64:
+        path = PROJECT_ROOT / "data" / f"{dataset}_knowledge.jsonl"
+    else:
+        path = PROJECT_ROOT / "data" / f"{dataset}_knowledge_k{fusion_length}.jsonl"
+    keys: Set[str] = set()
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            key = obj.get("key")
+            if key is not None:
+                keys.add(str(key))
+    return keys
 
 
 def _index_path(args: argparse.Namespace, dataset: str) -> str:
@@ -102,55 +115,66 @@ def _index_path(args: argparse.Namespace, dataset: str) -> str:
 def _evaluate_mode(
     retriever: DenseRetriever,
     rows: List[Dict[str, Any]],
-    gold_map: Dict[str, List[int]],
+    indexed_keys: Set[str],
     top_k: int,
     query_mode: str,
 ) -> Dict[str, Any]:
+    """按 key 匹配评测检索正确率（单视图模式）。"""
     tested = 0
-    top1_exact = 0
+    top1_hit = 0
     topk_hit = 0
     examples = []
 
     for idx, row in enumerate(rows):
-        gold = gold_map.get(str(row["key"]))
-        if gold is None:
+        gold_key = str(row["key"])
+        # 只评测确实在索引中的文档
+        if gold_key not in indexed_keys:
             continue
 
         query = _build_query(row, query_mode)
         search = retriever.search_from_texts([query], top_k=top_k)
-        candidates = search.fusion_ids[0].detach().cpu().tolist()
-        pred_top1 = candidates[0] if candidates else []
+        # indices shape: [1, top_k]；valid_mask shape: [1, top_k]
+        raw_indices = search.indices[0].tolist()
+        valid_mask = search.valid_mask[0].tolist()
+        retrieved_keys: List[str] = [
+            retriever.index.keys[int(i)]
+            for i, v in zip(raw_indices, valid_mask)
+            if v and int(i) >= 0
+        ]
 
-        top1_exact += int(pred_top1 == gold)
-        hit = any(candidate == gold for candidate in candidates)
-        topk_hit += int(hit)
+        hit_top1 = bool(retrieved_keys) and retrieved_keys[0] == gold_key
+        hit_topk = gold_key in retrieved_keys
+        top1_hit += int(hit_top1)
+        topk_hit += int(hit_topk)
         tested += 1
 
         if idx < 5:
             examples.append(
                 {
                     "idx": idx,
-                    "key": row["key"],
+                    "gold_key": gold_key[:120],
                     "query_preview": query[:160],
-                    "top1_exact": pred_top1 == gold,
-                    "topk_hit": hit,
-                    "gold_text": retriever.tokenizer.decode(
-                        _trim_pad(gold, retriever.tokenizer.pad_token_id),
-                        skip_special_tokens=True,
-                    ),
-                    "pred_text": retriever.tokenizer.decode(
-                        _trim_pad(pred_top1, retriever.tokenizer.pad_token_id),
-                        skip_special_tokens=True,
-                    ),
+                    "top1_hit": hit_top1,
+                    "topk_hit": hit_topk,
+                    "pred_top1_key": retrieved_keys[0][:120] if retrieved_keys else "",
                 }
             )
 
     if tested == 0:
-        raise RuntimeError(f"no matched samples for query_mode={query_mode}")
+        raise RuntimeError(f"no indexed samples matched for query_mode={query_mode}")
+
+    logger.info(
+        "[%s] tested=%d top1_hit_rate=%.4f topk(%d)_hit_rate=%.4f",
+        query_mode,
+        tested,
+        top1_hit / tested,
+        top_k,
+        topk_hit / tested,
+    )
 
     return {
         "tested": tested,
-        "top1_exact_rate": top1_exact / tested,
+        "top1_hit_rate": top1_hit / tested,
         "topk_hit_rate": topk_hit / tested,
         "top_k": top_k,
         "examples": examples,
@@ -167,21 +191,27 @@ def _evaluate_dataset(
     device: str,
 ) -> Dict[str, Any]:
     rows = _load_rows(dataset, limit)
-    gold_map = load_knowledge_map(_gold_map_path(dataset))
+    indexed_keys = _load_indexed_keys(dataset, cfg.model.fusion_length)
+    logger.info("[%s] rows=%d indexed_keys=%d", dataset, len(rows), len(indexed_keys))
     retriever = DenseRetriever(cfg=cfg, index_path=index_path, device=device)
     modes = ["question_only", "question_choices"] if query_mode == "both" else [query_mode]
     return {
         "dataset": dataset,
         "index": index_path,
-        "gold_map": _gold_map_path(dataset),
+        "indexed_keys": len(indexed_keys),
         "results": {
-            mode: _evaluate_mode(retriever, rows, gold_map, top_k=top_k, query_mode=mode)
+            mode: _evaluate_mode(retriever, rows, indexed_keys, top_k=top_k, query_mode=mode)
             for mode in modes
         },
     }
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
+    )
     args = _parse_args()
     cfg = load_config(args.config, cli_overrides=_parse_overrides(args.override))
     cfg.train.bf16 = args.device != "cpu"

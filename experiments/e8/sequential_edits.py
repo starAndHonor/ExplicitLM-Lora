@@ -92,15 +92,13 @@ def run_e8c_sequential_edits(
     step_list = _parse_steps(steps)
     max_step = max(step_list)
 
-    original_text_path = resolve_path("data/medqa_knowledge_original_text.jsonl")
-    knowledge_map_path = resolve_path(cfg.eval.medqa_knowledge_map)
     full_index_path_resolved = resolve_path(full_index_path)
     phase3_weights_resolved = resolve_path(phase3_weights)
 
     # Each unique key contributes three possible operations:
     # upsert -> delete -> rollback.
     n_unique_keys = (max_step + 2) // 3
-    knowledge_entries = load_medqa_knowledge_entries(original_text_path, knowledge_map_path)
+    knowledge_entries = load_medqa_knowledge_entries(cfg.model.fusion_length)
     edit_rows = select_edit_rows(limit=n_unique_keys, seed=seed, knowledge_entries=knowledge_entries)
     if len(edit_rows) < n_unique_keys:
         raise ValueError(f"requested {n_unique_keys} editable rows, but only {len(edit_rows)} are available")
@@ -131,10 +129,8 @@ def run_e8c_sequential_edits(
         phase3_tokenizer,
         full_retriever,
         edit_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     full_qa_by_key = {
         row["key"]: bool(flag) for row, flag in zip(edit_rows, full_eval["qa_correct_flags"])
@@ -147,10 +143,8 @@ def run_e8c_sequential_edits(
         phase3_tokenizer,
         full_retriever,
         locality_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     # Start from a base-missing state and then edit the same index online.
@@ -268,10 +262,8 @@ def run_e8c_sequential_edits(
             phase3_tokenizer,
             retriever,
             present_rows,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         ) if present_rows else {
             "qa_acc": 0.0,
             "retrieval_top1": 0.0,
@@ -285,10 +277,8 @@ def run_e8c_sequential_edits(
             phase3_tokenizer,
             retriever,
             deleted_rows,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         ) if deleted_rows else {
             "qa_acc": 0.0,
             "retrieval_top1": 0.0,
@@ -302,10 +292,8 @@ def run_e8c_sequential_edits(
             phase3_tokenizer,
             retriever,
             rolled_back_rows,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         ) if rolled_back_rows else {
             "qa_acc": 0.0,
             "retrieval_top1": 0.0,
@@ -319,10 +307,8 @@ def run_e8c_sequential_edits(
             phase3_tokenizer,
             retriever,
             locality_rows,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         )
         retrieval_latency_ms = _measure_retrieval_latency_ms(retriever, locality_rows, query_mode=query_mode)
 

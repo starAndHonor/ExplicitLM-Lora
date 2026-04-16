@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# 一键自动化 Dense E7：
-#   1. 构建 1M FineWeb base
-#   2. 生成 MedQA / ARC / MMLU 三份 overlay index
-#   3. 先评测检索正确率
-#   4. 再运行 Dense E7 评测
+# 一键自动化 Dense E7（单视图，fusion_length 由 K_SIZE 指定）：
+#   1. 构建 1M FineWeb base（可跳过：BUILD_BASE=0）
+#   2. 生成 MedQA / ARC / MMLU 三份 overlay index（可跳过：BUILD_OVERLAYS=0）
+#   3. 评测检索正确率（可跳过：RUN_RETRIEVAL_EVAL=0）
+#   4. 运行 Dense E7 评测（可跳过：SKIP_E7=1）
 #
-# 默认同时跑两套 anchor 版本：
-#   - original_text
-#   - k256（将 knowledge_ids 解码成检索文本）
+# 用法示例：
+#   BUILD_BASE=0 BUILD_OVERLAYS=0 TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
+#     bash experiments/e7/run_dense_full.sh
+#
+#   K_SIZE=128 BUILD_BASE=0 \
+#     bash experiments/e7/run_dense_full.sh
 
 set -euo pipefail
 
@@ -17,14 +20,13 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${PROJECT_ROOT}/scripts/_experiment_common.sh"
 
 CONFIG="${CONFIG:-${PROJECT_ROOT}/config/default.yaml}"
-GPU_IDS="${GPU_IDS:-2}"
+GPU_IDS="${GPU_IDS:-6}"
 DEVICE="${DEVICE:-cuda:0}"
 ENC_MODE="${ENC_MODE:-qwen3}"
 QUERY_MODE="${QUERY_MODE:-question_only}"
 MAX_SAMPLES="${MAX_SAMPLES:--1}"
 DRY_RUN="${DRY_RUN:-0}"
-ANCHOR_VARIANTS="${ANCHOR_VARIANTS:-original_text,k256}"
-RETRIEVAL_DEPTH="${RETRIEVAL_DEPTH:-24}"
+K_SIZE="${K_SIZE:-64}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 TOKENIZE_BATCH_SIZE="${TOKENIZE_BATCH_SIZE:-10000}"
 
@@ -33,7 +35,23 @@ PARQUET_DIR="${PARQUET_DIR:-${DATA_ROOT}/compressed/v2}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_ROOT}/checkpoints}"
 TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS:-${PROJECT_ROOT}/checkpoints/p3_from_p2_qwen3_10ep/phase3_best}"
 
-BASE_INDEX="${BASE_INDEX:-${CHECKPOINT_DIR}/dense_fineweb_1m_flat_r24_qwen3.pt}"
+BASE_INDEX="${BASE_INDEX:-${CHECKPOINT_DIR}/dense_fineweb_1m_flat_r0_qwen3_fv.pt}"
+
+# 输入使用对应 k-size 的预处理 knowledge 文件（k64 无后缀，其余带 _k{K_SIZE}）
+if [ "${K_SIZE}" = "64" ]; then
+    MEDQA_INPUT="${MEDQA_INPUT:-${DATA_ROOT}/medqa_knowledge.jsonl}"
+    ARC_INPUT="${ARC_INPUT:-${DATA_ROOT}/arc_knowledge.jsonl}"
+    MMLU_INPUT="${MMLU_INPUT:-${DATA_ROOT}/mmlu_knowledge.jsonl}"
+else
+    MEDQA_INPUT="${MEDQA_INPUT:-${DATA_ROOT}/medqa_knowledge_k${K_SIZE}.jsonl}"
+    ARC_INPUT="${ARC_INPUT:-${DATA_ROOT}/arc_knowledge_k${K_SIZE}.jsonl}"
+    MMLU_INPUT="${MMLU_INPUT:-${DATA_ROOT}/mmlu_knowledge_k${K_SIZE}.jsonl}"
+fi
+
+# 输出文件名带 k${K_SIZE}
+MEDQA_INDEX="${MEDQA_INDEX:-${CHECKPOINT_DIR}/dense_fineweb_medqa_overlay_k${K_SIZE}_flat_r0_qwen3.pt}"
+ARC_INDEX="${ARC_INDEX:-${CHECKPOINT_DIR}/dense_fineweb_arc_overlay_k${K_SIZE}_flat_r0_qwen3.pt}"
+MMLU_INDEX="${MMLU_INDEX:-${CHECKPOINT_DIR}/dense_fineweb_mmlu_overlay_k${K_SIZE}_flat_r0_qwen3.pt}"
 
 BUILD_BASE="${BUILD_BASE:-1}"
 BUILD_OVERLAYS="${BUILD_OVERLAYS:-1}"
@@ -41,45 +59,6 @@ SKIP_E7="${SKIP_E7:-0}"
 RUN_RETRIEVAL_EVAL="${RUN_RETRIEVAL_EVAL:-1}"
 
 declare -a EXTRA_ARGS=("$@")
-
-extract_retrieval_depth_from_args() {
-    local prev_is_override=0
-    local arg override_value
-    for arg in "${EXTRA_ARGS[@]}"; do
-        if [ "${prev_is_override}" = "1" ]; then
-            override_value="${arg}"
-            prev_is_override=0
-        elif [ "${arg}" = "--override" ]; then
-            prev_is_override=1
-            continue
-        elif [[ "${arg}" == --override=* ]]; then
-            override_value="${arg#--override=}"
-        else
-            continue
-        fi
-
-        if [[ "${override_value}" == model.retrieval_encoder_depth=* ]]; then
-            printf '%s' "${override_value#model.retrieval_encoder_depth=}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-if depth_from_args="$(extract_retrieval_depth_from_args)"; then
-    RETRIEVAL_DEPTH="${depth_from_args}"
-fi
-
-MEDQA_ANCHOR="${MEDQA_ANCHOR:-${DATA_ROOT}/medqa_knowledge_original_text.jsonl}"
-MEDQA_FUSION="${MEDQA_FUSION:-${DATA_ROOT}/medqa_knowledge.jsonl}"
-ARC_ANCHOR="${ARC_ANCHOR:-${DATA_ROOT}/arc_knowledge_original_text.jsonl}"
-ARC_FUSION="${ARC_FUSION:-${DATA_ROOT}/arc_knowledge.jsonl}"
-MMLU_ANCHOR="${MMLU_ANCHOR:-${DATA_ROOT}/mmlu_knowledge_original_text.jsonl}"
-MMLU_FUSION="${MMLU_FUSION:-${DATA_ROOT}/mmlu_knowledge.jsonl}"
-
-MEDQA_ANCHOR_K256="${MEDQA_ANCHOR_K256:-${DATA_ROOT}/medqa_knowledge_k256.jsonl}"
-ARC_ANCHOR_K256="${ARC_ANCHOR_K256:-${DATA_ROOT}/arc_knowledge_k256.jsonl}"
-MMLU_ANCHOR_K256="${MMLU_ANCHOR_K256:-${DATA_ROOT}/mmlu_knowledge_k256.jsonl}"
 
 exp_load_env
 export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
@@ -95,17 +74,18 @@ run_cmd() {
 echo "[E7DenseFull] config=${CONFIG}"
 echo "[E7DenseFull] device=${DEVICE}"
 echo "[E7DenseFull] enc_mode=${ENC_MODE}"
-echo "[E7DenseFull] data_root=${DATA_ROOT}"
-echo "[E7DenseFull] parquet_dir=${PARQUET_DIR}"
+echo "[E7DenseFull] k_size=${K_SIZE}"
 echo "[E7DenseFull] base_index=${BASE_INDEX}"
+echo "[E7DenseFull] medqa_index=${MEDQA_INDEX}"
+echo "[E7DenseFull] arc_index=${ARC_INDEX}"
+echo "[E7DenseFull] mmlu_index=${MMLU_INDEX}"
 echo "[E7DenseFull] training_free_weights=${TRAINING_FREE_WEIGHTS}"
 echo "[E7DenseFull] query_mode=${QUERY_MODE}"
 echo "[E7DenseFull] max_samples=${MAX_SAMPLES}"
+echo "[E7DenseFull] build_base=${BUILD_BASE}"
+echo "[E7DenseFull] build_overlays=${BUILD_OVERLAYS}"
 echo "[E7DenseFull] run_retrieval_eval=${RUN_RETRIEVAL_EVAL}"
-echo "[E7DenseFull] anchor_variants=${ANCHOR_VARIANTS}"
-echo "[E7DenseFull] retrieval_depth=${RETRIEVAL_DEPTH}"
-echo "[E7DenseFull] batch_size=${BATCH_SIZE}"
-echo "[E7DenseFull] tokenize_batch_size=${TOKENIZE_BATCH_SIZE}"
+echo "[E7DenseFull] skip_e7=${SKIP_E7}"
 
 if [ "${BUILD_BASE}" = "1" ]; then
     run_cmd \
@@ -120,139 +100,86 @@ if [ "${BUILD_BASE}" = "1" ]; then
         --batch-size "${BATCH_SIZE}" \
         --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
         --index-type flat \
+        --override "model.fusion_length=${K_SIZE}" \
         "${EXTRA_ARGS[@]}"
 fi
 
-variant_medqa_anchor() {
-    case "$1" in
-        original_text) printf '%s' "${MEDQA_ANCHOR}" ;;
-        k256) printf '%s' "${MEDQA_ANCHOR_K256}" ;;
-        *) echo "[E7DenseFull] unknown variant: $1" >&2; exit 1 ;;
-    esac
-}
-
-variant_arc_anchor() {
-    case "$1" in
-        original_text) printf '%s' "${ARC_ANCHOR}" ;;
-        k256) printf '%s' "${ARC_ANCHOR_K256}" ;;
-        *) echo "[E7DenseFull] unknown variant: $1" >&2; exit 1 ;;
-    esac
-}
-
-variant_mmlu_anchor() {
-    case "$1" in
-        original_text) printf '%s' "${MMLU_ANCHOR}" ;;
-        k256) printf '%s' "${MMLU_ANCHOR_K256}" ;;
-        *) echo "[E7DenseFull] unknown variant: $1" >&2; exit 1 ;;
-    esac
-}
-
-variant_medqa_index() {
-    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_medqa_overlay_$1_flat_r${RETRIEVAL_DEPTH}_qwen3.pt"
-}
-
-variant_arc_index() {
-    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_arc_overlay_$1_flat_r${RETRIEVAL_DEPTH}_qwen3.pt"
-}
-
-variant_mmlu_index() {
-    printf '%s' "${CHECKPOINT_DIR}/dense_fineweb_mmlu_overlay_$1_flat_r${RETRIEVAL_DEPTH}_qwen3.pt"
-}
-
-IFS=',' read -r -a VARIANT_LIST <<< "${ANCHOR_VARIANTS}"
-for variant in "${VARIANT_LIST[@]}"; do
-    variant="${variant// /}"
-    [ -n "${variant}" ] || continue
-
-    MEDQA_INDEX="$(variant_medqa_index "${variant}")"
-    ARC_INDEX="$(variant_arc_index "${variant}")"
-    MMLU_INDEX="$(variant_mmlu_index "${variant}")"
-    MEDQA_ANCHOR_CUR="$(variant_medqa_anchor "${variant}")"
-    ARC_ANCHOR_CUR="$(variant_arc_anchor "${variant}")"
-    MMLU_ANCHOR_CUR="$(variant_mmlu_anchor "${variant}")"
-
-    echo "[E7DenseFull] ===== variant=${variant} ====="
-    echo "[E7DenseFull] medqa_index=${MEDQA_INDEX}"
-    echo "[E7DenseFull] arc_index=${ARC_INDEX}"
-    echo "[E7DenseFull] mmlu_index=${MMLU_INDEX}"
-
-    if [ "${BUILD_OVERLAYS}" = "1" ]; then
-        run_cmd \
-            conda run --no-capture-output -n ExplicitLLM \
-            python "${PROJECT_ROOT}/scripts/overlay_dense_index.py" \
-            --config "${CONFIG}" \
-            --index "${BASE_INDEX}" \
-            --anchor-input "${MEDQA_ANCHOR_CUR}" \
-            --fusion-input "${MEDQA_FUSION}" \
-            --output "${MEDQA_INDEX}" \
-            --device "${DEVICE}" \
-            --batch-size "${BATCH_SIZE}" \
-            --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
-            --seed 42 \
-            "${EXTRA_ARGS[@]}"
-
-        run_cmd \
-            conda run --no-capture-output -n ExplicitLLM \
-            python "${PROJECT_ROOT}/scripts/overlay_dense_index.py" \
-            --config "${CONFIG}" \
-            --index "${BASE_INDEX}" \
-            --anchor-input "${ARC_ANCHOR_CUR}" \
-            --fusion-input "${ARC_FUSION}" \
-            --output "${ARC_INDEX}" \
-            --device "${DEVICE}" \
-            --batch-size "${BATCH_SIZE}" \
-            --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
-            --seed 42 \
-            "${EXTRA_ARGS[@]}"
-
-        run_cmd \
-            conda run --no-capture-output -n ExplicitLLM \
-            python "${PROJECT_ROOT}/scripts/overlay_dense_index.py" \
-            --config "${CONFIG}" \
-            --index "${BASE_INDEX}" \
-            --anchor-input "${MMLU_ANCHOR_CUR}" \
-            --fusion-input "${MMLU_FUSION}" \
-            --output "${MMLU_INDEX}" \
-            --device "${DEVICE}" \
-            --batch-size "${BATCH_SIZE}" \
-            --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
-            --seed 42 \
-            "${EXTRA_ARGS[@]}"
-    fi
-
-    if [ "${SKIP_E7}" = "1" ]; then
-        continue
-    fi
-
-    if [ "${RUN_RETRIEVAL_EVAL}" = "1" ]; then
-        run_cmd \
-            conda run --no-capture-output -n ExplicitLLM \
-            python "${PROJECT_ROOT}/experiments/e7/eval_dense_retrieval.py" \
-            --config "${CONFIG}" \
-            --dense-index-medqa "${MEDQA_INDEX}" \
-            --dense-index-arc "${ARC_INDEX}" \
-            --dense-index-mmlu "${MMLU_INDEX}" \
-            --device "${DEVICE}" \
-            --top-k 16 \
-            --query-mode "${QUERY_MODE}" \
-            --limit "${MAX_SAMPLES}" \
-            --output "${PROJECT_ROOT}/results/e7/e7_dense_retrieval_precheck_${variant}_r${RETRIEVAL_DEPTH}.json" \
-            "${EXTRA_ARGS[@]}"
-    fi
+if [ "${BUILD_OVERLAYS}" = "1" ]; then
+    run_cmd \
+        conda run --no-capture-output -n ExplicitLLM \
+        python "${PROJECT_ROOT}/scripts/overlay_dense_index.py" \
+        --config "${CONFIG}" \
+        --index "${BASE_INDEX}" \
+        --input "${MEDQA_INPUT}" \
+        --output "${MEDQA_INDEX}" \
+        --device "${DEVICE}" \
+        --batch-size "${BATCH_SIZE}" \
+        --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
+        --seed 42 \
+        --override "model.fusion_length=${K_SIZE}" \
+        "${EXTRA_ARGS[@]}"
 
     run_cmd \
-        env \
-        CONFIG="${CONFIG}" \
-        GPU_IDS="${GPU_IDS}" \
-        DEVICE="${DEVICE}" \
-        ENC_MODE="${ENC_MODE}" \
-        QUERY_MODE="${QUERY_MODE}" \
-        MAX_SAMPLES="${MAX_SAMPLES}" \
-        DENSE_INDEX_MEDQA="${MEDQA_INDEX}" \
-        DENSE_INDEX_ARC="${ARC_INDEX}" \
-        DENSE_INDEX_MMLU="${MMLU_INDEX}" \
-        TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}" \
-        OUTPUT="${PROJECT_ROOT}/results/e7/e7_dense_${variant}_r${RETRIEVAL_DEPTH}_$(basename "${TRAINING_FREE_WEIGHTS}").json" \
-        bash "${PROJECT_ROOT}/experiments/e7/run.sh" \
+        conda run --no-capture-output -n ExplicitLLM \
+        python "${PROJECT_ROOT}/scripts/overlay_dense_index.py" \
+        --config "${CONFIG}" \
+        --index "${BASE_INDEX}" \
+        --input "${ARC_INPUT}" \
+        --output "${ARC_INDEX}" \
+        --device "${DEVICE}" \
+        --batch-size "${BATCH_SIZE}" \
+        --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
+        --seed 42 \
+        --override "model.fusion_length=${K_SIZE}" \
         "${EXTRA_ARGS[@]}"
-done
+
+    run_cmd \
+        conda run --no-capture-output -n ExplicitLLM \
+        python "${PROJECT_ROOT}/scripts/overlay_dense_index.py" \
+        --config "${CONFIG}" \
+        --index "${BASE_INDEX}" \
+        --input "${MMLU_INPUT}" \
+        --output "${MMLU_INDEX}" \
+        --device "${DEVICE}" \
+        --batch-size "${BATCH_SIZE}" \
+        --tokenize-batch-size "${TOKENIZE_BATCH_SIZE}" \
+        --seed 42 \
+        --override "model.fusion_length=${K_SIZE}" \
+        "${EXTRA_ARGS[@]}"
+fi
+
+if [ "${RUN_RETRIEVAL_EVAL}" = "1" ]; then
+    run_cmd \
+        conda run --no-capture-output -n ExplicitLLM \
+        python "${PROJECT_ROOT}/experiments/e7/eval_dense_retrieval.py" \
+        --config "${CONFIG}" \
+        --dense-index-medqa "${MEDQA_INDEX}" \
+        --dense-index-arc "${ARC_INDEX}" \
+        --dense-index-mmlu "${MMLU_INDEX}" \
+        --device "${DEVICE}" \
+        --top-k 16 \
+        --query-mode "${QUERY_MODE}" \
+        --limit "${MAX_SAMPLES}" \
+        --output "${PROJECT_ROOT}/results/e7/e7_dense_retrieval_precheck_k${K_SIZE}_r0.json" \
+        "${EXTRA_ARGS[@]}"
+fi
+
+if [ "${SKIP_E7}" = "1" ]; then
+    exit 0
+fi
+
+run_cmd \
+    env \
+    CONFIG="${CONFIG}" \
+    GPU_IDS="${GPU_IDS}" \
+    DEVICE="${DEVICE}" \
+    ENC_MODE="${ENC_MODE}" \
+    QUERY_MODE="${QUERY_MODE}" \
+    MAX_SAMPLES="${MAX_SAMPLES}" \
+    DENSE_INDEX_MEDQA="${MEDQA_INDEX}" \
+    DENSE_INDEX_ARC="${ARC_INDEX}" \
+    DENSE_INDEX_MMLU="${MMLU_INDEX}" \
+    TRAINING_FREE_WEIGHTS="${TRAINING_FREE_WEIGHTS}" \
+    OUTPUT="${PROJECT_ROOT}/results/e7/e7_dense_k${K_SIZE}_r0_$(basename "${TRAINING_FREE_WEIGHTS}").json" \
+    bash "${PROJECT_ROOT}/experiments/e7/run.sh" \
+    "${EXTRA_ARGS[@]}"

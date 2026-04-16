@@ -32,12 +32,6 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--full-index", default=None, help="full dense index path (required for controlled)")
     parser.add_argument("--base-index", default=None, help="FineWeb base dense index path (required for overlay_1m)")
-    parser.add_argument(
-        "--anchor-variant",
-        choices=["original_text", "k256"],
-        default="original_text",
-        help="anchor representation used when memory_setting=overlay_1m",
-    )
     parser.add_argument("--overlay-seed", type=int, default=42, help="random overlay replacement seed")
     parser.add_argument("--phase3-weights", required=True, help="phase3 checkpoint directory")
     parser.add_argument("--device", default="cuda:0", help="device")
@@ -112,7 +106,6 @@ def main() -> None:
         full_index_path=args.full_index,
         base_index_path=args.base_index,
         device=args.device,
-        anchor_variant=args.anchor_variant,
         overlay_seed=args.overlay_seed,
     )
     full_index_path = prepared["full_index_path"]

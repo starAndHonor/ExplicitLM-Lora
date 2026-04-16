@@ -12,9 +12,9 @@
 #     PHASE3_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment_auto.sh e3_multik
 #   DRY_RUN=1 bash scripts/run_experiment_auto.sh e6
-#   DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_original_text_flat_r24_qwen3.pt \
-#     DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_original_text_flat_r24_qwen3.pt \
-#     DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_original_text_flat_r24_qwen3.pt \
+#   DENSE_INDEX_MEDQA=checkpoints/dense_fineweb_medqa_overlay_k64_flat_r0_qwen3.pt \
+#     DENSE_INDEX_ARC=checkpoints/dense_fineweb_arc_overlay_k64_flat_r0_qwen3.pt \
+#     DENSE_INDEX_MMLU=checkpoints/dense_fineweb_mmlu_overlay_k64_flat_r0_qwen3.pt \
 #     TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \
 #     bash scripts/run_experiment_auto.sh e7
 #   TRAINING_FREE_WEIGHTS=checkpoints/p3_from_p2_qwen3_10ep/phase3_best \

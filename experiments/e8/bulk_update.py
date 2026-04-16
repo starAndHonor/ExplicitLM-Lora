@@ -84,10 +84,7 @@ def run_e8d_batch_ingest(
     init_logging()
     device_obj = torch.device(device)
 
-    knowledge_entries = load_medqa_knowledge_entries(
-        resolve_path("data/medqa_knowledge_original_text.jsonl"),
-        resolve_path(cfg.eval.medqa_knowledge_map),
-    )
+    knowledge_entries = load_medqa_knowledge_entries(cfg.model.fusion_length)
     ingest_rows, old_rows = select_disjoint_row_groups(
         [n_edits, locality_samples],
         seed=seed,
@@ -112,20 +109,16 @@ def run_e8d_batch_ingest(
         phase3_tokenizer,
         base_retriever,
         old_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     ingest_before = evaluate_edit_rows(
         phase3_model,
         phase3_tokenizer,
         base_retriever,
         ingest_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     embeddings, fusion_ids, texts = _prepare_embeddings_and_fusion(
@@ -149,20 +142,16 @@ def run_e8d_batch_ingest(
         phase3_tokenizer,
         updated_retriever,
         old_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     ingest_after = evaluate_edit_rows(
         phase3_model,
         phase3_tokenizer,
         updated_retriever,
         ingest_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     result: Dict[str, Any] = {
@@ -223,10 +212,7 @@ def run_e8d_incremental_add_delete(
     init_logging()
     device_obj = torch.device(device)
 
-    knowledge_entries = load_medqa_knowledge_entries(
-        resolve_path("data/medqa_knowledge_original_text.jsonl"),
-        resolve_path(cfg.eval.medqa_knowledge_map),
-    )
+    knowledge_entries = load_medqa_knowledge_entries(cfg.model.fusion_length)
     add_rows, delete_rows, old_rows = select_disjoint_row_groups(
         [n_edits, n_edits, locality_samples],
         seed=seed,
@@ -260,20 +246,16 @@ def run_e8d_incremental_add_delete(
         phase3_tokenizer,
         base_retriever,
         old_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     add_before = evaluate_edit_rows(
         phase3_model,
         phase3_tokenizer,
         base_retriever,
         add_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     add_batches = _split_batches(add_keys, update_batch_size)
@@ -307,20 +289,16 @@ def run_e8d_incremental_add_delete(
             phase3_tokenizer,
             retriever,
             current_add_rows,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         )
         old_eval = evaluate_edit_rows(
             phase3_model,
             phase3_tokenizer,
             retriever,
             old_rows,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         )
         add_stage.append(
             {
@@ -345,10 +323,8 @@ def run_e8d_incremental_add_delete(
         phase3_tokenizer,
         post_add_retriever,
         delete_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     deleted_so_far: List[Dict[str, Any]] = []
@@ -366,20 +342,16 @@ def run_e8d_incremental_add_delete(
             phase3_tokenizer,
             retriever,
             deleted_so_far,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         )
         old_eval = evaluate_edit_rows(
             phase3_model,
             phase3_tokenizer,
             retriever,
             old_rows,
-            knowledge_entries,
             device=device_obj,
             query_mode=query_mode,
-            fusion_length=cfg.model.fusion_length,
         )
         delete_stage.append(
             {
@@ -405,30 +377,24 @@ def run_e8d_incremental_add_delete(
         phase3_tokenizer,
         final_retriever,
         add_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     delete_after = evaluate_edit_rows(
         phase3_model,
         phase3_tokenizer,
         final_retriever,
         delete_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     old_after = evaluate_edit_rows(
         phase3_model,
         phase3_tokenizer,
         final_retriever,
         old_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
 
     result: Dict[str, Any] = {

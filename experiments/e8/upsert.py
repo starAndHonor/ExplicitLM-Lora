@@ -36,12 +36,10 @@ def run_e8a_upsert(
     init_logging()
     device_obj = torch.device(device)
 
-    original_text_path = resolve_path("data/medqa_knowledge_original_text.jsonl")
-    knowledge_map_path = resolve_path(cfg.eval.medqa_knowledge_map)
     full_index_path_resolved = resolve_path(full_index_path)
     phase3_weights_resolved = resolve_path(phase3_weights)
 
-    knowledge_entries = load_medqa_knowledge_entries(original_text_path, knowledge_map_path)
+    knowledge_entries = load_medqa_knowledge_entries(cfg.model.fusion_length)
     edit_rows = select_edit_rows(limit=n_edits, seed=seed, knowledge_entries=knowledge_entries)
     edit_keys = [row["key"] for row in edit_rows]
 
@@ -64,10 +62,8 @@ def run_e8a_upsert(
         phase3_tokenizer,
         base_missing_retriever,
         edit_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     pre_write_acc = before_eval["qa_acc"]
     retrieval_top1_before = before_eval["retrieval_top1"]
@@ -113,10 +109,8 @@ def run_e8a_upsert(
         phase3_tokenizer,
         updated_retriever,
         edit_rows,
-        knowledge_entries,
         device=device_obj,
         query_mode=query_mode,
-        fusion_length=cfg.model.fusion_length,
     )
     post_write_acc = after_eval["qa_acc"]
     retrieval_top1_after = after_eval["retrieval_top1"]
