@@ -135,6 +135,59 @@ def _build_retrieval_query(args: argparse.Namespace) -> str:
     )
 
 
+def _build_compressor(
+    cfg: Any,
+    compression_rate: float,
+    device: torch.device,
+    backend: str,
+) -> Optional[KnowledgeCompressor]:
+    """初始化 LLMLingua compressor（mock_tokenize 模式返回 None）。"""
+    if backend == "mock_tokenize":
+        return None
+    gpu_id = device.index if device.type == "cuda" else None
+    return KnowledgeCompressor(
+        model_name=cfg.paths.llmlingua_model_dir,
+        compression_rate=compression_rate,
+        gpu_id=gpu_id,
+    )
+
+
+def _compress_text_to_ids(
+    tokenizer: AutoTokenizer,
+    source_text: str,
+    compressor: Optional[KnowledgeCompressor],
+    backend: str,
+    fusion_length: int,
+) -> tuple[str, List[int]]:
+    """压缩源文本为 fusion token IDs（使用已初始化的 compressor）。
+
+    参数：
+        fusion_length: 目标 token 长度（target_token）。
+    """
+    if backend == "mock_tokenize":
+        token_ids = tokenizer.encode(source_text, add_special_tokens=False)
+        token_ids = token_ids[:fusion_length]
+        if len(token_ids) < fusion_length:
+            token_ids.extend([tokenizer.pad_token_id] * (fusion_length - len(token_ids)))
+        compressed_text = tokenizer.decode(
+            [x for x in token_ids if x != tokenizer.pad_token_id],
+            skip_special_tokens=True,
+        ).strip()
+        if not compressed_text:
+            compressed_text = source_text[:200].strip()
+        return compressed_text, token_ids
+
+    assert compressor is not None
+    compressed_text = compressor.compress_text(source_text, target_token=fusion_length)
+    if compressed_text is None or not compressed_text.strip():
+        raise RuntimeError("LLMLingua compression returned empty result")
+    token_ids = tokenizer.encode(compressed_text, add_special_tokens=False)
+    token_ids = token_ids[:fusion_length]
+    if len(token_ids) < fusion_length:
+        token_ids.extend([tokenizer.pad_token_id] * (fusion_length - len(token_ids)))
+    return compressed_text, token_ids
+
+
 def _compress_to_fusion_ids(
     cfg: Any,
     tokenizer: AutoTokenizer,
@@ -144,39 +197,9 @@ def _compress_to_fusion_ids(
     backend: str,
     retrieval_fusion_length: int,
 ) -> tuple[str, List[int]]:
-    """压缩源文本为 fusion token IDs。
-
-    参数：
-        retrieval_fusion_length: 检索侧 dense index 存储的目标 token 长度。
-    """
-
-    if backend == "mock_tokenize":
-        token_ids = tokenizer.encode(source_text, add_special_tokens=False)
-        token_ids = token_ids[:retrieval_fusion_length]
-        if len(token_ids) < retrieval_fusion_length:
-            token_ids.extend([tokenizer.pad_token_id] * (retrieval_fusion_length - len(token_ids)))
-        compressed_text = tokenizer.decode(
-            [x for x in token_ids if x != tokenizer.pad_token_id],
-            skip_special_tokens=True,
-        ).strip()
-        if not compressed_text:
-            compressed_text = source_text[:200].strip()
-        return compressed_text, token_ids
-
-    gpu_id = device.index if device.type == "cuda" else None
-    compressor = KnowledgeCompressor(
-        model_name=cfg.paths.llmlingua_model_dir,
-        compression_rate=compression_rate,
-        gpu_id=gpu_id,
-    )
-    compressed_text = compressor.compress_text(source_text)
-    if compressed_text is None or not compressed_text.strip():
-        raise RuntimeError("LLMLingua compression returned empty result")
-    token_ids = tokenizer.encode(compressed_text, add_special_tokens=False)
-    token_ids = token_ids[:retrieval_fusion_length]
-    if len(token_ids) < retrieval_fusion_length:
-        token_ids.extend([tokenizer.pad_token_id] * (retrieval_fusion_length - len(token_ids)))
-    return compressed_text, token_ids
+    """压缩源文本为 fusion token IDs（保留旧接口，内部新建 compressor）。"""
+    compressor = _build_compressor(cfg, compression_rate, device, backend)
+    return _compress_text_to_ids(tokenizer, source_text, compressor, backend, retrieval_fusion_length)
 
 
 def _choice_label(index: int) -> str:
@@ -255,14 +278,14 @@ def main() -> None:
     )
 
     # ── 单视图压缩（k64），检索与注入共用同一份 fusion_ids ──
-    compressed_text, fusion_ids = _compress_to_fusion_ids(
-        cfg=cfg,
+    # compressor 初始化一次，后续 query 压缩复用
+    compressor = _build_compressor(cfg, args.compression_rate, device, args.compression_backend)
+    compressed_text, fusion_ids = _compress_text_to_ids(
         tokenizer=tokenizer,
         source_text=original_knowledge,
-        compression_rate=args.compression_rate,
-        device=device,
+        compressor=compressor,
         backend=args.compression_backend,
-        retrieval_fusion_length=fusion_length,
+        fusion_length=fusion_length,
     )
 
     anchor_text = original_knowledge
@@ -322,19 +345,29 @@ def main() -> None:
         dense_index.save(overlay_index)
         overlay_index_path = str(overlay_index)
 
-    retrieval_query = _build_retrieval_query(args)
+    # query 与写入路径对称：也经过 LLMLingua 压缩（target_token=fusion_length）后再编码
+    retrieval_query_raw = _build_retrieval_query(args)
+    compressed_query, _ = _compress_text_to_ids(
+        tokenizer=tokenizer,
+        source_text=retrieval_query_raw,
+        compressor=compressor,
+        backend=args.compression_backend,
+        fusion_length=fusion_length,
+    )
+    logger.info("Retrieval query (compressed): %s", compressed_query[:120])
     encoded_query = encoder_tokenizer(
-        [retrieval_query],
-        max_length=cfg.model.fusion_length,   # 单视图
+        [compressed_query],
+        max_length=cfg.model.fusion_length,
         truncation=True,
         padding="max_length",
         add_special_tokens=False,
         return_tensors="pt",
     )
-    query_emb = encoder.encode_mean(
-        encoded_query["input_ids"].to(device),
-        encoded_query["attention_mask"].long().to(device),
-    )
+    with torch.no_grad():
+        query_emb = encoder.encode_mean(
+            encoded_query["input_ids"].to(device),
+            encoded_query["attention_mask"].long().to(device),
+        )
     search_out = dense_index.search(query_emb.detach().cpu(), top_k=args.top_k)
 
     retrieved_rows: List[Dict[str, Any]] = []
@@ -403,7 +436,7 @@ def main() -> None:
         "question": {
             "question": args.question,
             "choices": [args.option_a, args.option_b, args.option_c, args.option_d],
-            "retrieval_query": retrieval_query,
+            "retrieval_query": retrieval_query_raw,
         },
         "retrieval": {
             "top_k": args.top_k,

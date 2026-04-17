@@ -90,7 +90,7 @@ def _compress(
         ids = tokenizer.encode(text, add_special_tokens=False)[:fusion_length]
     else:
         assert compressor is not None
-        compressed = compressor.compress_text(text)
+        compressed = compressor.compress_text(text, target_token=fusion_length)
         if not compressed:
             compressed = text[:200]
         ids = tokenizer.encode(compressed, add_special_tokens=False)[:fusion_length]

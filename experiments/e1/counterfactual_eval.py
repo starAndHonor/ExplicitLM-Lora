@@ -53,16 +53,25 @@ class KnowledgeCompressor:
         )
         self.compression_rate = compression_rate
 
-    def compress_text(self, text: str) -> Optional[str]:
+    def compress_text(self, text: str, target_token: Optional[int] = None) -> Optional[str]:
+        """压缩文本。
+
+        参数：
+            target_token: 若指定，使用固定目标 token 数（对齐 FineWeb 预处理方式）；
+                          否则使用 compression_rate 按比例压缩。
+        """
+        kwargs: Dict[str, Any] = dict(
+            force_tokens=[],
+            use_token_level_filter=True,
+            use_context_level_filter=False,
+            use_sentence_level_filter=False,
+        )
+        if target_token is not None:
+            kwargs["target_token"] = target_token
+        else:
+            kwargs["rate"] = self.compression_rate
         try:
-            result = self.compressor.compress_prompt(
-                text,
-                rate=self.compression_rate,
-                force_tokens=[],
-                use_token_level_filter=True,
-                use_context_level_filter=False,
-                use_sentence_level_filter=False,
-            )
+            result = self.compressor.compress_prompt(text, **kwargs)
         except Exception:  # pragma: no cover - compressor/runtime dependent
             logger.exception("Counterfactual compression failed")
             return None
