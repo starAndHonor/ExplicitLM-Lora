@@ -314,13 +314,14 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    # 单视图：用 compressed_text 在 fusion_encoder_depth 下编码
+    # 双视图：检索 embedding 用 original_knowledge 原始截断（前 fusion_length token）
+    #         注入 fusion_ids 用 LLMLingua 压缩后的 token（信息密度高）
     encoder, encoder_tokenizer = build_fusion_encoder_and_tokenizer(cfg, device=device)
     embedding = encode_fusion_texts(
         cfg=cfg,
         encoder=encoder,
         tokenizer=encoder_tokenizer,
-        texts=[compressed_text],
+        texts=[original_knowledge],
         device=device,
     )
 
@@ -345,18 +346,11 @@ def main() -> None:
         dense_index.save(overlay_index)
         overlay_index_path = str(overlay_index)
 
-    # query 与写入路径对称：也经过 LLMLingua 压缩（target_token=fusion_length）后再编码
+    # 双视图检索：query 用原始截断（前 fusion_length token），与写入 embedding 对称
     retrieval_query_raw = _build_retrieval_query(args)
-    compressed_query, _ = _compress_text_to_ids(
-        tokenizer=tokenizer,
-        source_text=retrieval_query_raw,
-        compressor=compressor,
-        backend=args.compression_backend,
-        fusion_length=fusion_length,
-    )
-    logger.info("Retrieval query (compressed): %s", compressed_query[:120])
+    logger.info("Retrieval query (raw): %s", retrieval_query_raw[:120])
     encoded_query = encoder_tokenizer(
-        [compressed_query],
+        [retrieval_query_raw],
         max_length=cfg.model.fusion_length,
         truncation=True,
         padding="max_length",

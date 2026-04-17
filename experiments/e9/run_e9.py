@@ -97,25 +97,14 @@ def _encode_query(
     tokenizer: AutoTokenizer,
     fusion_length: int,
     device: torch.device,
-    compressor: Optional[KnowledgeCompressor] = None,
-    compression_rate: float = 0.25,
-    compression_backend: str = "llmlingua",
 ) -> torch.Tensor:
-    """将 query 文本压缩后编码为归一化 embedding [1, hidden_dim]（CPU）。
+    """将 query 文本原始截断后编码为 embedding [1, hidden_dim]（CPU）。
 
-    与写入时对称：query 也经过同样的 LLMLingua 压缩（target_token=fusion_length），
-    确保 r0(compressed_query) ≈ r0(compressed_knowledge)。
+    双视图方案：检索侧统一使用原始 token 截断（前 fusion_length 个 token），
+    不做 LLMLingua 压缩，与写入侧 r0(original_text[:64]) 对称对齐。
     """
-    compressed_query, _ = _compress(
-        compressor=compressor,
-        tokenizer=tokenizer,
-        text=text,
-        fusion_length=fusion_length,
-        rate=compression_rate,
-        backend=compression_backend,
-    )
     enc = tokenizer(
-        [compressed_query],
+        [text],
         max_length=fusion_length,
         truncation=True,
         padding="max_length",
@@ -139,20 +128,15 @@ def _probe_single(
     fusion_length: int,
     device: torch.device,
     query_mode: str,
-    compressor: Optional[KnowledgeCompressor] = None,
-    compression_rate: float = 0.25,
-    compression_backend: str = "llmlingua",
 ) -> Dict[str, Any]:
     """对单条 row 做闭卷探测（检索 + 注入 + QA），直接操作 in-memory index。"""
-    # Step 4: 检索（query 也经过与写入对称的 LLMLingua 压缩）
+    # Step 4: 检索（原始截断，与写入侧 r0(original_text[:64]) 对称）
     if query_mode == "question_only":
         query = row["question"]
     else:
         query = build_multiple_choice_prompt(row["question"], row["choices"])
 
-    q_emb = _encode_query(query, encoder, enc_tokenizer, fusion_length, device,
-                          compressor=compressor, compression_rate=compression_rate,
-                          compression_backend=compression_backend)
+    q_emb = _encode_query(query, encoder, enc_tokenizer, fusion_length, device)
     search = index.search(q_emb, top_k=1)
 
     idx = int(search.indices[0][0].item())
@@ -217,9 +201,7 @@ def _run_dataset(
     logger.info("[E9][%s] 写入前探测 %d 条 ...", dataset, len(probe_rows))
     before_results = [
         _probe_single(row, current_index, encoder, enc_tokenizer,
-                      phase3_model, phase3_tokenizer, fusion_length, device, query_mode,
-                      compressor=compressor, compression_rate=compression_rate,
-                      compression_backend=compression_backend)
+                      phase3_model, phase3_tokenizer, fusion_length, device, query_mode)
         for row in probe_rows
     ]
     before_retrieval = sum(r["retrieval_hit"] for r in before_results) / max(len(before_results), 1)
@@ -234,7 +216,17 @@ def _run_dataset(
         original_text = row["original_text"]
         t0 = time.time()
 
-        # Step 2: LLMLingua 压缩（或 mock_tokenize）
+        # Step 2a: 检索 embedding — original_text 原始截断（前 fusion_length 个 token）
+        # 双视图：embedding 与 query 均使用原始截断，确保检索侧对齐
+        emb = encode_fusion_texts(
+            cfg=cfg,
+            encoder=encoder,
+            tokenizer=enc_tokenizer,
+            texts=[original_text],
+            device=device,
+        )  # [1, hidden_dim]
+
+        # Step 2b: 注入 fusion_ids — LLMLingua 压缩（信息密度高，供 cross-attention 注入）
         compressed_text, fusion_ids_list = _compress(
             compressor=compressor,
             tokenizer=enc_tokenizer,
@@ -243,15 +235,6 @@ def _run_dataset(
             rate=compression_rate,
             backend=compression_backend,
         )
-
-        # 编码 embedding：与 E7 保持一致，用 compressed_text 编码（单视图）
-        emb = encode_fusion_texts(
-            cfg=cfg,
-            encoder=encoder,
-            tokenizer=enc_tokenizer,
-            texts=[compressed_text],
-            device=device,
-        )  # [1, hidden_dim]
 
         fusion_ids_tensor = torch.tensor([fusion_ids_list], dtype=torch.long)  # [1, fusion_length]
 
@@ -271,18 +254,16 @@ def _run_dataset(
 
         # ── 写一条查一条诊断（仅前 3 条）──
         if i < 3:
-            # 用 compressed_text 自查（与写入 embedding 一致，理论上必须命中）
+            # 用 original_text 自查（与写入 embedding 完全一致，理论上必须命中）
             self_emb = encode_fusion_texts(cfg=cfg, encoder=encoder, tokenizer=enc_tokenizer,
-                                           texts=[compressed_text], device=device)
+                                           texts=[original_text], device=device)
             self_search = current_index.search(self_emb.cpu(), top_k=1)
             self_idx = int(self_search.indices[0][0].item())
             self_valid = bool(self_search.valid_mask[0][0].item())
             self_key = current_index.keys[self_idx] if self_valid and self_idx >= 0 else ""
             self_hit = self_key == str(row["key"])
-            # 用压缩后的 question 查（与写入对称）
-            q_emb = _encode_query(row["question"], encoder, enc_tokenizer, fusion_length, device,
-                                  compressor=compressor, compression_rate=compression_rate,
-                                  compression_backend=compression_backend)
+            # 用 raw question 查（双视图检索侧）
+            q_emb = _encode_query(row["question"], encoder, enc_tokenizer, fusion_length, device)
             q_search = current_index.search(q_emb, top_k=1)
             q_idx = int(q_search.indices[0][0].item())
             q_valid = bool(q_search.valid_mask[0][0].item())
@@ -290,9 +271,9 @@ def _run_dataset(
             q_hit = q_key == str(row["key"])
             logger.info(
                 "[E9][%s] diag step=%d | self_hit=%s(valid=%s) q_hit=%s(valid=%s) | "
-                "compressed='%s...' question='%s...'",
+                "original='%s...' question='%s...'",
                 dataset, i + 1, self_hit, self_valid, q_hit, q_valid,
-                compressed_text[:40], row["question"][:40],
+                original_text[:40], row["question"][:40],
             )
 
         write_log.append({
@@ -311,9 +292,7 @@ def _run_dataset(
     logger.info("[E9][%s] 写入后探测 %d 条 ...", dataset, len(probe_rows))
     after_results = [
         _probe_single(row, current_index, encoder, enc_tokenizer,
-                      phase3_model, phase3_tokenizer, fusion_length, device, query_mode,
-                      compressor=compressor, compression_rate=compression_rate,
-                      compression_backend=compression_backend)
+                      phase3_model, phase3_tokenizer, fusion_length, device, query_mode)
         for row in probe_rows
     ]
     after_retrieval = sum(r["retrieval_hit"] for r in after_results) / max(len(after_results), 1)

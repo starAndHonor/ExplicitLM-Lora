@@ -309,9 +309,10 @@ def main() -> None:
     _section("Overlay 更新知识库")
     knowledge_key = raw_knowledge[:200].strip()
     fusion_ids_t = torch.tensor([fusion_ids], dtype=torch.long)
-    # 单视图：embedding 来自 compressed_text（与 fusion_ids 同源）
+    # 双视图：检索 embedding 用 raw_knowledge 原始截断（前 fusion_length token）
+    #         注入 fusion_ids 用 LLMLingua 压缩后的 token
     embedding = encode_fusion_texts(cfg=cfg, encoder=encoder, tokenizer=enc_tok,
-                                    texts=[compressed_text], device=device)  # [1, D]
+                                    texts=[raw_knowledge], device=device)  # [1, D]
 
     rng = random.Random(args.seed)
     replaced_key = dense_index.keys[rng.randrange(len(dense_index))]
@@ -336,10 +337,9 @@ def main() -> None:
         print("[错误] 问题不能为空。")
         sys.exit(1)
 
-    # 检索 query = 问题 + 第一轮压缩知识（不带答案，保证命中新写入条目）
-    # compressed_text 来自不含答案的原始知识，避免答案信息泄露到检索路径
-    retrieval_query = f"{question} {compressed_text}".strip()
-    print(f"  检索 query（问题 + 压缩知识，不含答案）: {retrieval_query[:120]}...")
+    # 双视图检索：query 用原始 question 截断（前 fusion_length token），与写入 embedding 对称
+    retrieval_query = question
+    print(f"  检索 query（原始 question 截断）: {retrieval_query[:120]}...")
 
     # 检索（仅此一次）
     _section("Dense 检索（第一个 token 前，仅检索一次）")
